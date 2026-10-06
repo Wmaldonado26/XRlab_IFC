@@ -314,11 +314,22 @@
     </main>
 
     <!-- Modal Aux: Crear Proyecto (Admin) -->
-    <div v-if="showCreateModal" class="modal-backdrop" @click.self="showCreateModal = false">
+    <div
+      v-if="showCreateModal"
+      class="modal-backdrop"
+      @click.self="createIfcState !== 'UPLOADING' && createIfcState !== 'PROCESSING' && !isSubmitting ? (showCreateModal = false) : null"
+    >
       <div class="dialog-card">
         <div class="dialog-header">
           <h3>➕ Nuevo Proyecto BIM</h3>
-          <button type="button" class="dialog-close-btn" @click="showCreateModal = false">✕</button>
+          <button
+            type="button"
+            class="dialog-close-btn"
+            :disabled="createIfcState === 'UPLOADING' || createIfcState === 'PROCESSING' || isSubmitting"
+            @click="showCreateModal = false"
+          >
+            ✕
+          </button>
         </div>
         <form @submit.prevent="submitCreateProject">
           <div class="form-group">
@@ -330,6 +341,7 @@
               required
               placeholder="Ej. Buque_Oceanografico_2026.ifc"
               class="form-input"
+              :disabled="createIfcState === 'UPLOADING' || createIfcState === 'PROCESSING' || isSubmitting"
             />
           </div>
           <div class="form-group">
@@ -340,11 +352,54 @@
               rows="2"
               placeholder="Detalles sobre el buque, sistema de tuberías, estructuras o arquitectura..."
               class="form-textarea"
+              :disabled="createIfcState === 'UPLOADING' || createIfcState === 'PROCESSING' || isSubmitting"
             ></textarea>
           </div>
 
-          <!-- Selección directa de archivo(s) .FRAG al crear proyecto -->
+          <!-- Selección de Modelo IFC inicial (Carga con Progreso Real) -->
           <div class="form-group">
+            <label class="form-label">Modelo IFC (.ifc) - Opcional</label>
+            <div
+              v-if="createIfcState === 'IDLE'"
+              class="drop-zone-select"
+              @click="createIfcInputRef?.click()"
+            >
+              <input
+                ref="createIfcInputRef"
+                type="file"
+                accept=".ifc"
+                style="display: none"
+                @change="onCreateIfcFileSelected"
+              />
+              <span class="dz-mini-icon">🚢</span>
+              <div class="dz-mini-text-wrap">
+                <span class="dz-mini-text">Haz clic para seleccionar el modelo <strong>.ifc</strong></span>
+                <span class="dz-mini-hint">Se subirá con barra de progreso real y se procesará automáticamente</span>
+              </div>
+            </div>
+
+            <!-- Interfaz de Progreso Real XRlab -->
+            <IfcUploadProgress
+              v-else
+              :state="createIfcState"
+              :file-name="createIfcFile?.name"
+              :file-size="createIfcFile?.size"
+              :progress-percent="createIfcProgress.percent"
+              :loaded-bytes="createIfcProgress.loadedBytes"
+              :total-bytes="createIfcProgress.totalBytes"
+              :speed-bytes-per-sec="createIfcProgress.speedBytesPerSec"
+              :remaining-sec="createIfcProgress.remainingSec"
+              :stage-text="createIfcProgress.stage"
+              :elapsed-time="createIfcProgress.elapsed"
+              :error-message="createIfcError"
+              @cancel="cancelCreateIfcUpload"
+              @retry="retryCreateIfcUpload"
+              @change-file="createIfcInputRef?.click()"
+            />
+          </div>
+
+          <!-- Selección directa de archivo(s) .FRAG al crear proyecto (si no seleccionó IFC) -->
+          <div v-if="!createIfcFile" class="form-group">
             <label class="form-label">Archivo(s) o Modelo(s) .FRAG (Opcional)</label>
             <div
               class="drop-zone-select"
@@ -377,10 +432,41 @@
           </div>
 
           <div class="dialog-actions">
-            <button type="button" class="btn-cancel" @click="showCreateModal = false">Cancelar</button>
-            <button type="submit" class="btn-confirm" :disabled="isSubmitting">
-              <span v-if="isSubmitting" class="spinner-sm"></span>
-              <span v-else>Guardar Proyecto</span>
+            <button
+              v-if="createIfcState === 'COMPLETED'"
+              type="button"
+              class="btn-cancel"
+              @click="showCreateModal = false"
+            >
+              Cerrar
+            </button>
+            <button
+              v-else
+              type="button"
+              class="btn-cancel"
+              :disabled="createIfcState === 'UPLOADING' || createIfcState === 'PROCESSING' || isSubmitting"
+              @click="showCreateModal = false"
+            >
+              Cancelar
+            </button>
+
+            <button
+              v-if="createIfcState === 'COMPLETED' && createdProjectForIfc"
+              type="button"
+              class="btn-confirm btn-viewer-launch"
+              @click="handleOpenProject(createdProjectForIfc); showCreateModal = false"
+            >
+              ⚡ Abrir Proyecto en Visor 3D
+            </button>
+
+            <button
+              v-else
+              type="submit"
+              class="btn-confirm"
+              :disabled="!createForm.name.trim() || isSubmitting || createIfcState === 'UPLOADING' || createIfcState === 'PROCESSING'"
+            >
+              <span v-if="isSubmitting || createIfcState === 'UPLOADING' || createIfcState === 'PROCESSING'" class="spinner-sm"></span>
+              <span v-else>{{ createIfcFile ? '🚀 Crear Proyecto y Cargar IFC' : 'Guardar Proyecto' }}</span>
             </button>
           </div>
         </form>
@@ -458,7 +544,7 @@
     <div
       v-if="showAddModelModal && activeProjectForModel"
       class="modal-backdrop"
-      @click.self="!isConvertingIfc && !isUploadingFrag ? (showAddModelModal = false) : null"
+      @click.self="!isConvertingIfc && !isUploadingFrag && ifcState !== 'UPLOADING' && ifcState !== 'PROCESSING' ? (showAddModelModal = false) : null"
     >
       <div class="dialog-card add-model-dialog">
         <div class="dialog-header">
@@ -474,7 +560,7 @@
           <button
             type="button"
             class="dialog-close-btn"
-            :disabled="isConvertingIfc || isUploadingFrag"
+            :disabled="isConvertingIfc || isUploadingFrag || ifcState === 'UPLOADING' || ifcState === 'PROCESSING'"
             @click="showAddModelModal = false"
           >
             ✕
@@ -487,7 +573,7 @@
             type="button"
             class="method-tab-btn"
             :class="{ active: activeModelTab === 'ifc' }"
-            :disabled="isConvertingIfc || isUploadingFrag"
+            :disabled="isConvertingIfc || isUploadingFrag || ifcState === 'UPLOADING' || ifcState === 'PROCESSING'"
             @click="activeModelTab = 'ifc'"
           >
             <span class="tab-icon">⚙️</span>
@@ -501,7 +587,7 @@
             type="button"
             class="method-tab-btn"
             :class="{ active: activeModelTab === 'frag' }"
-            :disabled="isConvertingIfc || isUploadingFrag"
+            :disabled="isConvertingIfc || isUploadingFrag || ifcState === 'UPLOADING' || ifcState === 'PROCESSING'"
             @click="activeModelTab = 'frag'"
           >
             <span class="tab-icon">📤</span>
@@ -523,59 +609,42 @@
 
             <!-- IFC File Selector Area -->
             <div
+              v-if="ifcState === 'IDLE'"
               class="drop-zone"
-              :class="{ 'has-file': Boolean(ifcFile), disabled: isConvertingIfc }"
-              @click="!isConvertingIfc ? ifcInputRef?.click() : null"
+              @click="ifcInputRef?.click()"
             >
               <input
                 ref="ifcInputRef"
                 type="file"
                 accept=".ifc"
                 style="display: none"
-                :disabled="isConvertingIfc"
                 @change="onIfcFileSelected"
               />
-              <div v-if="!ifcFile" class="drop-zone-placeholder">
+              <div class="drop-zone-placeholder">
                 <span class="dz-icon">🚢</span>
                 <span class="dz-prompt">Haz clic para seleccionar un archivo .ifc</span>
                 <span class="dz-subtext">Formatos IFC2x3 e IFC4 compatibles</span>
               </div>
-              <div v-else class="dz-selected-file">
-                <span class="dz-file-icon">📄</span>
-                <div class="dz-file-meta">
-                  <span class="dz-file-name" :title="ifcFile.name">{{ ifcFile.name }}</span>
-                  <span class="dz-file-size">{{ (ifcFile.size / (1024 * 1024)).toFixed(2) }} MB</span>
-                </div>
-                <button
-                  v-if="!isConvertingIfc"
-                  type="button"
-                  class="dz-change-btn"
-                  @click.stop="ifcInputRef?.click()"
-                >
-                  Cambiar
-                </button>
-              </div>
             </div>
 
-            <!-- Error alert -->
-            <div v-if="ifcError" class="method-alert alert-error">
-              <span class="alert-icon">⚠️</span>
-              <span class="alert-text">{{ ifcError }}</span>
-            </div>
-
-            <!-- In-progress HUD -->
-            <div v-if="isConvertingIfc" class="conversion-progress-box">
-              <div class="c-progress-header">
-                <span class="c-stage">{{ ifcProgressStage || 'Procesando conversión IFC...' }}</span>
-                <span class="c-percent">{{ ifcProgressPercent }}%</span>
-              </div>
-              <div class="c-track">
-                <div class="c-fill" :style="{ width: `${Math.max(ifcProgressPercent, 3)}%` }"></div>
-              </div>
-              <div v-if="ifcProgressElapsed" class="c-time">
-                ⏱️ Tiempo transcurrido: {{ ifcProgressElapsed }}
-              </div>
-            </div>
+            <!-- Interfaz de Progreso Real XRlab -->
+            <IfcUploadProgress
+              v-else
+              :state="ifcState"
+              :file-name="ifcFile?.name"
+              :file-size="ifcFile?.size"
+              :progress-percent="ifcProgress.percent"
+              :loaded-bytes="ifcProgress.loadedBytes"
+              :total-bytes="ifcProgress.totalBytes"
+              :speed-bytes-per-sec="ifcProgress.speedBytesPerSec"
+              :remaining-sec="ifcProgress.remainingSec"
+              :stage-text="ifcProgress.stage"
+              :elapsed-time="ifcProgress.elapsed"
+              :error-message="ifcError"
+              @cancel="cancelIfcConversion"
+              @retry="retryIfcConversion"
+              @change-file="ifcInputRef?.click()"
+            />
 
             <!-- Success State -->
             <div v-if="ifcConversionSuccess" class="method-alert alert-success">
@@ -592,7 +661,7 @@
               <button
                 type="button"
                 class="btn-cancel"
-                :disabled="isConvertingIfc"
+                :disabled="ifcState === 'UPLOADING' || ifcState === 'PROCESSING'"
                 @click="showAddModelModal = false"
               >
                 {{ ifcConversionSuccess ? 'Cerrar' : 'Cancelar' }}
@@ -611,10 +680,10 @@
                 v-else
                 type="button"
                 class="btn-confirm"
-                :disabled="!ifcFile || isConvertingIfc"
+                :disabled="!ifcFile || ifcState === 'UPLOADING' || ifcState === 'PROCESSING'"
                 @click="startIfcConversion"
               >
-                <span v-if="isConvertingIfc" class="spinner-sm"></span>
+                <span v-if="ifcState === 'UPLOADING' || ifcState === 'PROCESSING'" class="spinner-sm"></span>
                 <span v-else>🚀 Convertir y Añadir Modelo</span>
               </button>
             </div>
@@ -759,6 +828,7 @@ import {
   convertIfcViaBackend,
   type BackendProject,
   type BackendModelItem,
+  type BackendConversionProgress,
 } from '../services/backend-client';
 import { appendProjectFragments } from '../services/frag-cache';
 import {
@@ -767,6 +837,7 @@ import {
   logout,
 } from '../services/auth-service';
 import AdminPanelModal from './AdminPanelModal.vue';
+import IfcUploadProgress, { type IfcUploadState } from './IfcUploadProgress.vue';
 
 const emit = defineEmits<{
   (e: 'open-project', project: BackendProject): void;
@@ -906,6 +977,22 @@ async function handleLogout() {
 const createSelectedFragFiles = ref<File[]>([]);
 const createFragInputRef = ref<HTMLInputElement | null>(null);
 
+// Create Project IFC state
+const createIfcFile = ref<File | null>(null);
+const createIfcInputRef = ref<HTMLInputElement | null>(null);
+const createIfcState = ref<IfcUploadState>('IDLE');
+const createIfcError = ref('');
+const createIfcProgress = ref<BackendConversionProgress>({
+  percent: 0,
+  stage: '',
+  loadedBytes: 0,
+  totalBytes: 0,
+  speedBytesPerSec: 0,
+  remainingSec: 0,
+});
+let createIfcAbortController: AbortController | null = null;
+const createdProjectForIfc = ref<BackendProject | null>(null);
+
 function onCreateFragFilesSelected(e: Event) {
   const input = e.target as HTMLInputElement;
   if (input.files && input.files.length > 0) {
@@ -915,48 +1002,162 @@ function onCreateFragFilesSelected(e: Event) {
   }
 }
 
+function onCreateIfcFileSelected(e: Event) {
+  const input = e.target as HTMLInputElement;
+  if (input.files && input.files.length > 0) {
+    const file = input.files[0];
+    if (!file.name.toLowerCase().endsWith('.ifc')) {
+      createIfcError.value = 'El archivo seleccionado debe tener extensión .ifc';
+      createIfcState.value = 'ERROR';
+      createIfcFile.value = null;
+      return;
+    }
+    if (file.size === 0) {
+      createIfcError.value = 'El archivo seleccionado está vacío (0 bytes).';
+      createIfcState.value = 'ERROR';
+      createIfcFile.value = null;
+      return;
+    }
+    createIfcFile.value = file;
+    createIfcState.value = 'SELECTED';
+    createIfcError.value = '';
+    createIfcProgress.value = {
+      percent: 0,
+      stage: '',
+      loadedBytes: 0,
+      totalBytes: file.size,
+      speedBytesPerSec: 0,
+      remainingSec: 0,
+    };
+    if (!createForm.value.name.trim()) {
+      createForm.value.name = file.name.replace(/\.ifc$/i, '');
+    }
+    input.value = '';
+  }
+}
+
+function cancelCreateIfcUpload() {
+  if (createIfcAbortController) {
+    createIfcAbortController.abort();
+    createIfcAbortController = null;
+  }
+  createIfcState.value = 'CANCELLED';
+  isSubmitting.value = false;
+}
+
+function retryCreateIfcUpload() {
+  submitCreateProject();
+}
+
+function resetCreateIfcFile() {
+  if (createIfcAbortController) {
+    createIfcAbortController.abort();
+    createIfcAbortController = null;
+  }
+  createIfcFile.value = null;
+  createIfcState.value = 'IDLE';
+  createIfcError.value = '';
+  createIfcProgress.value = {
+    percent: 0,
+    stage: '',
+    loadedBytes: 0,
+    totalBytes: 0,
+    speedBytesPerSec: 0,
+    remainingSec: 0,
+  };
+}
+
 function openCreateModal() {
   createForm.value = { name: '', description: '' };
   createSelectedFragFiles.value = [];
+  createdProjectForIfc.value = null;
+  resetCreateIfcFile();
   showCreateModal.value = true;
 }
 
 async function submitCreateProject() {
   if (!createForm.value.name.trim()) return;
+  if (isSubmitting.value) return;
+
   isSubmitting.value = true;
   try {
-    const created = await createBackendProject(
-      createForm.value.name.trim(),
-      createForm.value.description.trim() || undefined
-    );
+    let targetProject = createdProjectForIfc.value;
+    if (!targetProject) {
+      targetProject = await createBackendProject(
+        createForm.value.name.trim(),
+        createForm.value.description.trim() || undefined
+      );
+      createdProjectForIfc.value = targetProject;
+    }
+
+    // Subida con progreso real si se seleccionó archivo IFC
+    if (createIfcFile.value) {
+      createIfcState.value = 'UPLOADING';
+      createIfcError.value = '';
+      createIfcAbortController = new AbortController();
+
+      const result = await convertIfcViaBackend(
+        createIfcFile.value,
+        (progress) => {
+          if (progress.phase === 'uploading') {
+            createIfcState.value = 'UPLOADING';
+          } else if (progress.phase === 'uploaded') {
+            createIfcState.value = 'UPLOADED';
+          } else if (progress.phase === 'processing') {
+            createIfcState.value = 'PROCESSING';
+          } else if (progress.phase === 'completed') {
+            createIfcState.value = 'COMPLETED';
+          }
+          createIfcProgress.value = { ...progress };
+        },
+        targetProject.id,
+        createIfcAbortController.signal
+      );
+
+      createIfcState.value = 'COMPLETED';
+      setFeedback(`Proyecto "${targetProject.name}" creado e incorporado exitosamente (${result.parts.length} partes generadas).`);
+      await loadProjects();
+      return;
+    }
 
     let uploadedCount = 0;
     if (createSelectedFragFiles.value.length > 0) {
       for (const file of createSelectedFragFiles.value) {
         try {
           const buf = await file.arrayBuffer();
-          await appendProjectFragments(created.id, created.name, [buf]);
+          await appendProjectFragments(targetProject.id, targetProject.name, [buf]);
         } catch {}
-        await uploadDirectFrag(created.id, file);
+        await uploadDirectFrag(targetProject.id, file);
         uploadedCount++;
       }
     }
 
     setFeedback(
       uploadedCount > 0
-        ? `Proyecto "${created.name}" creado con éxito con ${uploadedCount} archivo(s) .frag asociado(s).`
-        : `Proyecto "${created.name}" creado con éxito. Ahora puedes añadir modelos mediante conversión IFC o subida directa de FRAG.`
+        ? `Proyecto "${targetProject.name}" creado con éxito con ${uploadedCount} archivo(s) .frag asociado(s).`
+        : `Proyecto "${targetProject.name}" creado con éxito.`
     );
     showCreateModal.value = false;
     createSelectedFragFiles.value = [];
     await loadProjects();
     if (uploadedCount === 0) {
-      openAddModelModal(created);
+      openAddModelModal(targetProject);
     }
   } catch (err: any) {
-    setFeedback(err.message || 'Error al crear proyecto.', 'error');
+    if (err.name === 'AbortError' || err.message?.includes('cancelada')) {
+      createIfcState.value = 'CANCELLED';
+      createIfcError.value = 'Carga cancelada por el usuario.';
+    } else {
+      if (createIfcFile.value) {
+        createIfcState.value = 'ERROR';
+        createIfcError.value = err.message || 'No se pudo cargar el archivo.';
+      } else {
+        setFeedback(err.message || 'Error al crear proyecto.', 'error');
+      }
+    }
   } finally {
     isSubmitting.value = false;
+    createIfcAbortController = null;
   }
 }
 
@@ -1022,10 +1223,18 @@ const activeModelTab = ref<'ifc' | 'frag'>('ifc');
 // Option A: Convert IFC state
 const ifcFile = ref<File | null>(null);
 const ifcInputRef = ref<HTMLInputElement | null>(null);
+const ifcState = ref<IfcUploadState>('IDLE');
 const isConvertingIfc = ref(false);
-const ifcProgressPercent = ref(0);
-const ifcProgressStage = ref('');
-const ifcProgressElapsed = ref('');
+const ifcProgress = ref<BackendConversionProgress>({
+  percent: 0,
+  stage: '',
+  elapsed: '',
+  loadedBytes: 0,
+  totalBytes: 0,
+  speedBytesPerSec: 0,
+  remainingSec: 0,
+});
+let ifcAbortController: AbortController | null = null;
 const ifcConversionSuccess = ref(false);
 const ifcSuccessInfo = ref<{ partsCount: number; duration: string; sizeMB: string } | null>(null);
 const ifcError = ref('');
@@ -1039,17 +1248,29 @@ const fragUploadSuccess = ref(false);
 const fragSuccessModel = ref<BackendModelItem | null>(null);
 const fragError = ref('');
 
-function openAddModelModal(project: BackendProject, defaultTab: 'ifc' | 'frag' = 'frag') {
+function openAddModelModal(project: BackendProject, defaultTab: 'ifc' | 'frag' = 'ifc') {
   activeProjectForModel.value = project;
   activeModelTab.value = defaultTab;
 
+  if (ifcAbortController) {
+    ifcAbortController.abort();
+    ifcAbortController = null;
+  }
+
   ifcFile.value = null;
+  ifcState.value = 'IDLE';
   ifcError.value = '';
   ifcConversionSuccess.value = false;
   isConvertingIfc.value = false;
-  ifcProgressPercent.value = 0;
-  ifcProgressStage.value = '';
-  ifcProgressElapsed.value = '';
+  ifcProgress.value = {
+    percent: 0,
+    stage: '',
+    elapsed: '',
+    loadedBytes: 0,
+    totalBytes: 0,
+    speedBytesPerSec: 0,
+    remainingSec: 0,
+  };
   ifcSuccessInfo.value = null;
 
   fragFiles.value = [];
@@ -1068,43 +1289,75 @@ function onIfcFileSelected(e: Event) {
     const file = input.files[0];
     if (!file.name.toLowerCase().endsWith('.ifc')) {
       ifcError.value = 'El archivo seleccionado debe tener extensión .ifc';
+      ifcState.value = 'ERROR';
       ifcFile.value = null;
       return;
     }
     if (file.size === 0) {
       ifcError.value = 'El archivo seleccionado está vacío (0 bytes).';
+      ifcState.value = 'ERROR';
       ifcFile.value = null;
       return;
     }
     ifcFile.value = file;
+    ifcState.value = 'SELECTED';
     ifcError.value = '';
     ifcConversionSuccess.value = false;
+    ifcProgress.value = {
+      percent: 0,
+      stage: '',
+      elapsed: '',
+      loadedBytes: 0,
+      totalBytes: file.size,
+      speedBytesPerSec: 0,
+      remainingSec: 0,
+    };
+    input.value = '';
   }
+}
+
+function cancelIfcConversion() {
+  if (ifcAbortController) {
+    ifcAbortController.abort();
+    ifcAbortController = null;
+  }
+  ifcState.value = 'CANCELLED';
+  isConvertingIfc.value = false;
+}
+
+function retryIfcConversion() {
+  startIfcConversion();
 }
 
 async function startIfcConversion() {
   if (!ifcFile.value || !activeProjectForModel.value || isConvertingIfc.value) return;
 
   isConvertingIfc.value = true;
-  ifcProgressPercent.value = 0;
-  ifcProgressStage.value = 'Iniciando subida y conexión con la cola de conversión...';
-  ifcProgressElapsed.value = '';
+  ifcState.value = 'UPLOADING';
   ifcError.value = '';
   ifcConversionSuccess.value = false;
+  ifcAbortController = new AbortController();
 
   try {
     const result = await convertIfcViaBackend(
       ifcFile.value,
       (progress) => {
-        ifcProgressPercent.value = progress.percent;
-        ifcProgressStage.value = progress.stage;
-        if (progress.elapsed) {
-          ifcProgressElapsed.value = progress.elapsed;
+        if (progress.phase === 'uploading') {
+          ifcState.value = 'UPLOADING';
+        } else if (progress.phase === 'uploaded') {
+          ifcState.value = 'UPLOADED';
+        } else if (progress.phase === 'processing') {
+          ifcState.value = 'PROCESSING';
+        } else if (progress.phase === 'completed') {
+          ifcState.value = 'COMPLETED';
         }
+        ifcProgress.value = { ...progress };
       },
-      activeProjectForModel.value.id
+      activeProjectForModel.value.id,
+      ifcAbortController.signal
     );
 
+    ifcState.value = 'COMPLETED';
     ifcConversionSuccess.value = true;
     ifcSuccessInfo.value = {
       partsCount: result.parts.length,
@@ -1114,10 +1367,16 @@ async function startIfcConversion() {
     setFeedback(`Conversión completada. ${result.parts.length} fragmento(s) incorporados a "${activeProjectForModel.value.name}".`);
     await loadProjects();
   } catch (err: any) {
-    console.error('Error durante la conversión IFC:', err);
-    ifcError.value = err.message || 'Error inesperado durante la conversión IFC en el backend.';
+    if (err.name === 'AbortError' || err.message?.includes('cancelada')) {
+      ifcState.value = 'CANCELLED';
+      ifcError.value = 'Carga cancelada por el usuario.';
+    } else {
+      ifcState.value = 'ERROR';
+      ifcError.value = err.message || 'No se pudo cargar el archivo.';
+    }
   } finally {
     isConvertingIfc.value = false;
+    ifcAbortController = null;
   }
 }
 
