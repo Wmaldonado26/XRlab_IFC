@@ -490,6 +490,37 @@ let isViewerReady = false;
 
 let healthInterval: any = null;
 
+// --- Detección y perfil de hardware móvil / tablet para optimización de memoria RAM ---
+const isMobileOrTabletDevice = (): boolean => {
+    if (typeof window === 'undefined' || !window.navigator) return false;
+    const ua = navigator.userAgent || '';
+    const isTouch = Boolean(navigator.maxTouchPoints && navigator.maxTouchPoints > 1);
+    const isMobileUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Tablet/i.test(ua);
+    const isIPadOS = /Macintosh/i.test(ua) && isTouch;
+    return isMobileUA || isIPadOS;
+};
+
+let fitCameraDebounceTimer: any = null;
+const debouncedFitCamera = (delay = 250) => {
+    if (fitCameraDebounceTimer) clearTimeout(fitCameraDebounceTimer);
+    fitCameraDebounceTimer = setTimeout(async () => {
+        await fitCameraToModels();
+    }, delay);
+};
+
+const refreshSpatialTreeSafely = (models: any[]) => {
+    if (!updateSpatialTree) return;
+    if (isMobileOrTabletDevice()) {
+        console.log('[Viewer] Árbol espacial omitido automáticamente en tablet/móvil para evitar el cierre por falta de memoria RAM.');
+        return;
+    }
+    try {
+        updateSpatialTree({ models });
+    } catch (err) {
+        console.warn('[Viewer] Error al actualizar árbol espacial:', err);
+    }
+};
+
 onMounted(async () => {
     if (!containerRef.value) return;
 
@@ -522,6 +553,24 @@ onMounted(async () => {
     world.camera = new OBC.OrthoPerspectiveCamera(components);
 
     components.init();
+
+    // Optimización crítica de GPU para tablets: limitar pixelRatio a 1.0 en pantallas de alta densidad
+    if (world?.renderer?.three) {
+        const isMobile = isMobileOrTabletDevice();
+        const maxRatio = isMobile ? 1.0 : 2.0;
+        world.renderer.three.setPixelRatio(Math.min(window.devicePixelRatio || 1, maxRatio));
+
+        const canvas = world.renderer.three.domElement;
+        if (canvas) {
+            canvas.addEventListener('webglcontextlost', (event: Event) => {
+                event.preventDefault();
+                console.error('[WebGL] Contexto WebGL perdido por límite de GPU/memoria.');
+                appLogger.error('El navegador perdió el contexto WebGL por falta de memoria RAM.');
+                alert('El navegador se quedó sin memoria gráfica (WebGL Context Lost). Cierra otras pestañas o divide el modelo.');
+            });
+        }
+    }
+
     world.camera.controls.maxDistance = 10000000;
     world.camera.controls.minDistance = 0.01;
     world.camera.controls.setLookAt(-60, 30, -20, 0, 0, -20);
@@ -537,17 +586,13 @@ onMounted(async () => {
         fragmentManager.core.update(true)
     );
 
-    // Al cargar cualquier modelo fragmentado, vincular a la escena y enfocar la cámara
+    // Al cargar cualquier modelo fragmentado, vincular a la escena y enfocar la cámara de manera debounced
     fragmentManager.list.onItemSet.add(async ({ value: model }) => {
-        model.useCamera(world.camera.three);
+        try { model.useCamera(world.camera.three); } catch {}
         if (model.object && world?.scene?.three && !world.scene.three.children.includes(model.object)) {
             world.scene.three.add(model.object);
         }
-        await fragmentManager.core.update(true);
-
-        setTimeout(async () => {
-            await fitCameraToModels();
-        }, 150);
+        debouncedFitCamera(250);
     });
 
     const [modelsListEl, updateModelsFn] = BUIC.tables.modelsList({
@@ -583,7 +628,7 @@ onMounted(async () => {
     propertiesTableEl.preserveStructureOnFilter = true;
     propertiesTableEl.indentationInText = false;
 
-    // Panel UI Adaptativo según rol (Admin vs Usuario Normal)
+    // Panel UI Adaptativo según rol y dispositivo (Admin vs Usuario Normal / Tablet)
     panel = BUI.Component.create(() => {
         const onSearchSpatialTree = (e: Event) => {
             const input = e.target as BUI.TextInput;
@@ -595,6 +640,14 @@ onMounted(async () => {
             propertiesTableEl.queryString = input.value !== "" ? input.value : null;
         };
 
+        const onManualGenerateTree = () => {
+            if (updateSpatialTree && fragmentManager) {
+                updateSpatialTree({ models: Array.from(fragmentManager.list.values()) });
+            }
+        };
+
+        const isMobile = isMobileOrTabletDevice();
+
         return BUI.html`
             <bim-panel label="${isAdmin.value ? 'IFC / FRAG Engine' : 'Visor BIM'}">
                 ${isAdmin.value ? BUI.html`
@@ -605,12 +658,24 @@ onMounted(async () => {
                     <bim-button label="Guardar .FRAG Actual" icon="flowbite:download-solid" @click=${downloadCurrentFrag}></bim-button>
                     <bim-button label="Enfocar Todo (Zoom Todo)" icon="material-symbols:fit-screen" @click=${() => fitCameraToModels()}></bim-button>
                     <bim-button label="Ver Consola / Logs de Errores" icon="material-symbols:terminal" @click=${openLogModal}></bim-button>
+                    ${isMobile ? BUI.html`
+                    <div style="padding: 6px 10px; margin: 4px 0; background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.25); border-radius: 6px; font-size: 11px; color: #93c5fd;">
+                        ⚡ <strong>Modo Tablet:</strong> Árbol jerárquico en pausa para proteger memoria.
+                    </div>
+                    <bim-button label="Cargar Árbol Manualmente" icon="material-symbols:account-tree" @click=${onManualGenerateTree}></bim-button>
+                    ` : ''}
                     <bim-text-input @input=${onSearchSpatialTree} placeholder="Buscar en Árbol..." debounce="200"></bim-text-input>
                     ${spatialTreeEl}
                 </bim-panel-section>
                 ` : BUI.html`
                 <bim-panel-section label="Navegación del Modelo">
                     <bim-button label="Enfocar Todo (Zoom Todo)" icon="material-symbols:fit-screen" @click=${() => fitCameraToModels()}></bim-button>
+                    ${isMobile ? BUI.html`
+                    <div style="padding: 6px 10px; margin: 4px 0; background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.25); border-radius: 6px; font-size: 11px; color: #93c5fd;">
+                        ⚡ <strong>Modo Tablet:</strong> Árbol jerárquico en pausa para proteger memoria.
+                    </div>
+                    <bim-button label="Cargar Árbol Manualmente" icon="material-symbols:account-tree" @click=${onManualGenerateTree}></bim-button>
+                    ` : ''}
                     <bim-text-input @input=${onSearchSpatialTree} placeholder="Buscar en Árbol..." debounce="200"></bim-text-input>
                     ${spatialTreeEl}
                 </bim-panel-section>
@@ -1059,9 +1124,7 @@ const loadCachedModel = async (id: string) => {
         if (updateModelsList) {
             updateModelsList();
         }
-        if (updateSpatialTree && fragmentManager) {
-            updateSpatialTree({ models: Array.from(fragmentManager.list.values()) });
-        }
+        refreshSpatialTreeSafely(Array.from(fragmentManager.list.values()));
 
         loadingProgress.value = 100;
         loadingStage.value = 'Encuadrando vista de cámara...';
@@ -1163,8 +1226,10 @@ const loadBackendProject = async (proj: BackendProject) => {
                 return;
             }
 
-            // Guardar automáticamente en IndexedDB para futuras visitas instantáneas
-            if (buffers.length > 0) {
+            // Guardar automáticamente en IndexedDB solo si es Desktop y tamaño menor a 60MB (evita clonaciones de 258MB en tablets)
+            const isMobile = isMobileOrTabletDevice();
+            const projectSizeMB = Number(proj.totalPartsSizeMB) || 0;
+            if (buffers.length > 0 && !isMobile && projectSizeMB < 60) {
                 saveProjectFragments(proj.id, proj.name || proj.fileName, buffers, proj.parts).catch(console.warn);
             }
         }
@@ -1173,10 +1238,13 @@ const loadBackendProject = async (proj: BackendProject) => {
             loadingStage.value = 'Inyectando fragmentos en la escena 3D...';
             lastFragmentBuffers = [];
 
+            const isMobile = isMobileOrTabletDevice();
+
             for (let i = 0; i < buffersToInject.length; i++) {
                 if (currentGen !== activeLoadGeneration) return;
 
                 const buf = buffersToInject[i];
+                if (!buf) continue;
                 const partName = (proj.parts && proj.parts[i]) || `${proj.name || 'model'}_part_${i + 1}.frag`;
                 const cleanModelId = partName.replace(/\.frag$/i, '');
 
@@ -1185,8 +1253,10 @@ const loadBackendProject = async (proj: BackendProject) => {
                 }
 
                 const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-                lastFragmentBytes = bytes;
-                lastFragmentBuffers.push(bytes);
+                if (!isMobile) {
+                    lastFragmentBytes = bytes;
+                    lastFragmentBuffers.push(bytes);
+                }
 
                 let loadedModel: any = null;
                 try {
@@ -1199,6 +1269,9 @@ const loadBackendProject = async (proj: BackendProject) => {
                         console.error(`[FRAG] Fallo definitivo al cargar parte "${cleanModelId}":`, errRaw);
                     }
                 }
+
+                // Liberar referencia al buffer crudo inmediatamente para que Garbage Collector reclame la RAM
+                buffersToInject[i] = null as any;
 
                 if (loadedModel) {
                     const modelKey = cleanModelId;
@@ -1224,7 +1297,9 @@ const loadBackendProject = async (proj: BackendProject) => {
                 await deleteCachedProject(proj.id);
                 buffers = await downloadBackendFragments(proj.id, proj.parts);
                 await injectFragments(buffers);
-                if (buffers.length > 0) {
+                const isMobile = isMobileOrTabletDevice();
+                const projectSizeMB = Number(proj.totalPartsSizeMB) || 0;
+                if (buffers.length > 0 && !isMobile && projectSizeMB < 60) {
                     saveProjectFragments(proj.id, proj.name || proj.fileName, buffers, proj.parts).catch(console.warn);
                 }
             } else {
@@ -1241,13 +1316,11 @@ const loadBackendProject = async (proj: BackendProject) => {
             await fragmentManager.core.update(true);
         } catch {}
 
-        // Actualizar listas y árboles en la interfaz
+        // Actualizar listas y árboles en la interfaz de forma segura para tablets
         if (updateModelsList) {
             updateModelsList();
         }
-        if (updateSpatialTree && fragmentManager) {
-            updateSpatialTree({ models: Array.from(fragmentManager.list.values()) });
-        }
+        refreshSpatialTreeSafely(Array.from(fragmentManager.list.values()));
 
         loadingProgress.value = 100;
         loadingStage.value = 'Encuadrando vista de cámara...';
@@ -1295,19 +1368,26 @@ const loadBackendModel = async (model: BackendModelItem) => {
     loadingStage.value = 'Conectando con el almacenamiento local...';
 
     try {
-        const buffer = await downloadModelFragment(model.id);
+        let buffer: any = await downloadModelFragment(model.id);
         if (currentGen !== activeLoadGeneration) return;
 
         loadingProgress.value = 75;
         loadingStage.value = 'Inyectando fragmento en GPU y escena 3D...';
 
+        const isMobile = isMobileOrTabletDevice();
         const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+        if (!isMobile) {
+            lastFragmentBytes = bytes;
+        }
         let loadedModel: any = null;
         try {
             loadedModel = await fragmentManager.core.load(bytes as any, { modelId: cleanModelId, raw: false });
         } catch {
             loadedModel = await fragmentManager.core.load(bytes as any, { modelId: cleanModelId, raw: true });
         }
+
+        // Liberar referencia al buffer de descarga
+        (buffer as any) = null;
 
         if (loadedModel) {
             const modelKey = cleanModelId || loadedModel.modelId || loadedModel.id;
@@ -1327,9 +1407,7 @@ const loadBackendModel = async (model: BackendModelItem) => {
         if (updateModelsList) {
             updateModelsList();
         }
-        if (updateSpatialTree && fragmentManager) {
-            updateSpatialTree({ models: Array.from(fragmentManager.list.values()) });
-        }
+        refreshSpatialTreeSafely(Array.from(fragmentManager.list.values()));
 
         loadingProgress.value = 100;
         loadingStage.value = 'Encuadrando vista de cámara...';
@@ -1486,6 +1564,9 @@ const loadMultipleFragFiles = async (files: File[]) => {
     isLoading.value = true;
     loadingProgress.value = 0;
 
+    const isMobile = isMobileOrTabletDevice();
+    const totalSizeMB = files.reduce((acc, f) => acc + f.size, 0) / (1024 * 1024);
+
     try {
         const cachedBuffers: ArrayBuffer[] = [];
         for (let i = 0; i < files.length; i++) {
@@ -1498,9 +1579,13 @@ const loadMultipleFragFiles = async (files: File[]) => {
             loadingProgress.value = Math.round((i / files.length) * 100);
 
             const buffer = await file.arrayBuffer();
-            cachedBuffers.push(buffer);
+            if (!isMobile && totalSizeMB < 60) {
+                cachedBuffers.push(buffer);
+            }
             const bytes = new Uint8Array(buffer);
-            lastFragmentBytes = bytes;
+            if (!isMobile) {
+                lastFragmentBytes = bytes;
+            }
 
             loadingStage.value = 'Inicializando geometría en GPU...';
             const cleanModelId = file.name.replace(/\.frag$/i, '');
@@ -1529,8 +1614,8 @@ const loadMultipleFragFiles = async (files: File[]) => {
             console.log(`[FRAG] Modelo cargado (${i + 1}/${files.length}): ${file.name}`);
         }
 
-        // Auto-guardar en IndexedDB local
-        if (cachedBuffers.length > 0) {
+        // Auto-guardar en IndexedDB local solo si es Desktop y tamaño menor a 60MB (evita clonaciones pesadas en tablets)
+        if (cachedBuffers.length > 0 && !isMobile && totalSizeMB < 60) {
             if (activeProjectId.value) {
                 await appendProjectFragments(activeProjectId.value, loadingFileName.value || 'Proyecto', cachedBuffers);
             } else {
@@ -1538,6 +1623,7 @@ const loadMultipleFragFiles = async (files: File[]) => {
                 await saveProjectFragments(cacheKey, files[0].name, cachedBuffers);
             }
         }
+        cachedBuffers.length = 0;
 
         // Si hay un proyecto activo en el backend, persistir automáticamente en SQLite y almacenamiento
         if (activeProjectId.value) {
@@ -1555,9 +1641,7 @@ const loadMultipleFragFiles = async (files: File[]) => {
         if (updateModelsList) {
             updateModelsList();
         }
-        if (updateSpatialTree && fragmentManager) {
-            updateSpatialTree({ models: Array.from(fragmentManager.list.values()) });
-        }
+        refreshSpatialTreeSafely(Array.from(fragmentManager.list.values()));
 
         loadingProgress.value = 100;
         loadingStage.value = 'Encuadrando vista de cámara...';
@@ -1647,9 +1731,7 @@ const processMultipleIfcFiles = async (files: File[], autoDownloadFrag: boolean 
                         if (updateModelsList) {
                             updateModelsList();
                         }
-                        if (updateSpatialTree && fragmentManager) {
-                            updateSpatialTree({ models: Array.from(fragmentManager.list.values()) });
-                        }
+                        refreshSpatialTreeSafely(Array.from(fragmentManager.list.values()));
 
                         // Auto-guardar en IndexedDB local
                         saveProjectFragments(
@@ -1761,9 +1843,7 @@ const processMultipleIfcFiles = async (files: File[], autoDownloadFrag: boolean 
         if (updateModelsList) {
             updateModelsList();
         }
-        if (updateSpatialTree && fragmentManager) {
-            updateSpatialTree({ models: Array.from(fragmentManager.list.values()) });
-        }
+        refreshSpatialTreeSafely(Array.from(fragmentManager.list.values()));
 
         loadingProgress.value = 100;
         loadingStage.value = 'Encuadrando vista de cámara...';
