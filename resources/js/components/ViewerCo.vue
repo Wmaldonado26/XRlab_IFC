@@ -112,64 +112,18 @@
         @dragover.prevent
         @drop.prevent="handleDrop"
     >
-        <!-- Barra superior derecha con Estado de Usuario y Microservicio -->
-        <div class="top-status-bar">
-            <!-- Botón para volver a la Galería Principal de Proyectos -->
-            <button
-                type="button"
-                class="auth-action-btn gallery-nav-btn"
-                title="Volver a la Galería Principal de Proyectos"
-                @click="$emit('return-gallery')"
-            >
-                📁 Galería
-            </button>
-
-            <!-- Pill de Autenticación y Rol -->
-            <div class="user-auth-pill">
-                <template v-if="currentUser">
-                    <div class="user-badge" :title="`Sesión activa: ${currentUser.email}`">
-                        <span class="user-role-dot" :class="currentUser.role"></span>
-                        <span class="user-name-text">{{ currentUser.name }}</span>
-                        <span class="user-role-tag" :class="currentUser.role">{{ currentUser.role === 'admin' ? 'Admin' : 'Usuario' }}</span>
-                    </div>
-                    <button
-                        v-if="isAdmin"
-                        type="button"
-                        class="auth-action-btn admin-btn"
-                        title="Abrir Panel de Administración"
-                        @click="isAdminModalOpen = true"
-                    >
-                        🛡️ Admin
-                    </button>
-                    <button
-                        type="button"
-                        class="auth-action-btn logout-btn"
-                        title="Cerrar sesión"
-                        @click="handleLogout"
-                    >
-                        Salir
-                    </button>
-                </template>
-                <template v-else>
-                    <button
-                        type="button"
-                        class="auth-action-btn login-btn"
-                        title="Iniciar sesión en IFC-XRlab"
-                        @click="isLoginModalOpen = true"
-                    >
-                        🔐 Iniciar Sesión
-                    </button>
-                </template>
-            </div>
-
-            <!-- Pill de estado del microservicio 64-bit -->
-            <div
-                class="backend-status-pill"
-                :class="{ 'is-online': backendStatus.online }"
-                :title="backendStatus.online ? `Microservicio 64-bit conectado (RAM libre: ${backendStatus.freeMemoryGB} GB)` : 'Microservicio desconectado (ejecuta npm run dev:all o npm run server)'"
-            >
-                <span class="status-dot"></span>
-                <span class="status-text">{{ backendStatus.online ? 'Backend 64-bit Activo' : 'Backend Offline' }}</span>
+        <!-- Barra superior flotante (.vtop) -->
+        <div v-if="isAdmin" class="vtop">
+            <div class="vtop-right-group">
+                <!-- Pill de estado del microservicio 64-bit (Solo Administrador) -->
+                <div
+                    class="backend-status-pill"
+                    :class="{ 'is-online': backendStatus.online }"
+                    :title="backendStatus.online ? `Microservicio 64-bit conectado (RAM libre: ${backendStatus.freeMemoryGB} GB)` : 'Microservicio desconectado'"
+                >
+                    <span class="status-dot"></span>
+                    <span class="status-text">{{ backendStatus.online ? 'Backend 64-bit' : 'Offline' }}</span>
+                </div>
             </div>
         </div>
 
@@ -177,7 +131,7 @@
         <input
             ref="ifcLoadInput"
             type="file"
-            accept=".ifc"
+            accept=".ifc,.frag"
             multiple
             style="display: none"
             @change="onIfcLoadSelected"
@@ -185,7 +139,7 @@
         <input
             ref="ifcConvertInput"
             type="file"
-            accept=".ifc"
+            accept=".ifc,.frag"
             multiple
             style="display: none"
             @change="onIfcConvertSelected"
@@ -193,7 +147,7 @@
         <input
             ref="fragInput"
             type="file"
-            accept=".frag"
+            accept=".frag,.ifc"
             multiple
             style="display: none"
             @change="onFragFileSelected"
@@ -213,11 +167,11 @@
             @close="isSectionActive = false"
         />
 
-        <!-- Botón Plegable Flotante para el Menú Lateral (class parent) -->
+        <!-- Botón Plegable Flotante para el Menú Lateral (Menú BIM a la izquierda) -->
         <button
             class="panel-toggle-tab"
             :class="{ 'is-collapsed': isPanelCollapsed }"
-            :title="isPanelCollapsed ? 'Mostrar menú lateral (Árbol y Propiedades) [P]' : 'Ocultar menú lateral [P]'"
+            :title="isPanelCollapsed ? 'Mostrar menú BIM (Árbol y Propiedades) [P]' : 'Ocultar menú BIM [P]'"
             type="button"
             @click="togglePanel"
         >
@@ -289,7 +243,6 @@ import AdminPanelModal from "./AdminPanelModal.vue";
 import {
     currentUser,
     isAdmin,
-    checkSession,
     logout,
 } from "../services/auth-service";
 import { appLogger } from "../services/logger";
@@ -344,6 +297,7 @@ const handleKeyDown = (e: KeyboardEvent) => {
     if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
         return;
     }
+    if (!e.key) return;
     const key = e.key.toLowerCase();
     if (key === 'p') {
         togglePanel();
@@ -356,6 +310,7 @@ const handleKeyDown = (e: KeyboardEvent) => {
 };
 
 const handleKeyUp = (e: KeyboardEvent) => {
+    if (!e.key) return;
     const key = e.key.toLowerCase();
     activeKeys.delete(key);
     if (activeKeys.size === 0) {
@@ -529,18 +484,19 @@ let updateSpatialTree: ((state?: any) => void) | null = null;
 let updateModelsList: ((state?: any) => void) | null = null;
 
 const activeProjectId = ref<string | null>(null);
+const activeProjectName = ref<string>('');
 let activeLoadGeneration = 0;
 let isViewerReady = false;
+
+let healthInterval: any = null;
 
 onMounted(async () => {
     if (!containerRef.value) return;
 
-    // Verificar sesión activa
-    await checkSession();
-
     // Verificar disponibilidad del microservicio local y sondear periódicamente
     backendStatus.value = await checkBackendHealth();
-    setInterval(async () => {
+    if (healthInterval) clearInterval(healthInterval);
+    healthInterval = setInterval(async () => {
         backendStatus.value = await checkBackendHealth();
     }, 8000);
 
@@ -584,18 +540,20 @@ onMounted(async () => {
     // Al cargar cualquier modelo fragmentado, vincular a la escena y enfocar la cámara
     fragmentManager.list.onItemSet.add(async ({ value: model }) => {
         model.useCamera(world.camera.three);
-        world.scene.three.add(model.object);
+        if (model.object && world?.scene?.three && !world.scene.three.children.includes(model.object)) {
+            world.scene.three.add(model.object);
+        }
         await fragmentManager.core.update(true);
 
         setTimeout(async () => {
-            await fitCameraToModels(model);
+            await fitCameraToModels();
         }, 150);
     });
 
     const [modelsListEl, updateModelsFn] = BUIC.tables.modelsList({
         components,
         metaDataTags: ["schema"],
-        actions: { download: true },
+        actions: { download: isAdmin.value ? true : false },
     });
     updateModelsList = updateModelsFn;
 
@@ -625,10 +583,8 @@ onMounted(async () => {
     propertiesTableEl.preserveStructureOnFilter = true;
     propertiesTableEl.indentationInText = false;
 
-    // Panel UI
+    // Panel UI Adaptativo según rol (Admin vs Usuario Normal)
     panel = BUI.Component.create(() => {
-        const [loadFragBtn] = BUIC.buttons.loadFrag({ components, world });
-
         const onSearchSpatialTree = (e: Event) => {
             const input = e.target as BUI.TextInput;
             spatialTreeEl.queryString = input.value;
@@ -640,17 +596,25 @@ onMounted(async () => {
         };
 
         return BUI.html`
-            <bim-panel label="IFC / FRAG Engine">
+            <bim-panel label="${isAdmin.value ? 'IFC / FRAG Engine' : 'Visor BIM'}">
+                ${isAdmin.value ? BUI.html`
                 <bim-panel-section label="Gestión de Archivos">
                     <bim-button label="Cargar Archivo(s) IFC" icon="material-symbols:file-open" @click=${openIfcLoadDialog}></bim-button>
                     <bim-button label="Cargar Archivo(s) .FRAG" icon="mage:box-3d-fill" @click=${openFragDialog}></bim-button>
                     <bim-button label="Convertir IFC a .FRAG" icon="material-symbols:transform" @click=${openIfcConvertDialog}></bim-button>
                     <bim-button label="Guardar .FRAG Actual" icon="flowbite:download-solid" @click=${downloadCurrentFrag}></bim-button>
-                    <bim-button label="Enfocar Barco (Zoom Todo)" icon="material-symbols:fit-screen" @click=${() => fitCameraToModels()}></bim-button>
+                    <bim-button label="Enfocar Todo (Zoom Todo)" icon="material-symbols:fit-screen" @click=${() => fitCameraToModels()}></bim-button>
                     <bim-button label="Ver Consola / Logs de Errores" icon="material-symbols:terminal" @click=${openLogModal}></bim-button>
                     <bim-text-input @input=${onSearchSpatialTree} placeholder="Buscar en Árbol..." debounce="200"></bim-text-input>
                     ${spatialTreeEl}
                 </bim-panel-section>
+                ` : BUI.html`
+                <bim-panel-section label="Navegación del Modelo">
+                    <bim-button label="Enfocar Todo (Zoom Todo)" icon="material-symbols:fit-screen" @click=${() => fitCameraToModels()}></bim-button>
+                    <bim-text-input @input=${onSearchSpatialTree} placeholder="Buscar en Árbol..." debounce="200"></bim-text-input>
+                    ${spatialTreeEl}
+                </bim-panel-section>
+                `}
                 <bim-panel-section icon="mage:box-3d-fill" label="Modelos Cargados">
                     ${modelsListEl}
                 </bim-panel-section>
@@ -721,6 +685,10 @@ const togglePanel = () => {
 };
 
 onUnmounted(() => {
+    if (healthInterval) {
+        clearInterval(healthInterval);
+        healthInterval = null;
+    }
     window.removeEventListener('keydown', handleKeyDown);
     window.removeEventListener('keyup', handleKeyUp);
     window.removeEventListener('blur', handleWindowBlur);
@@ -919,6 +887,7 @@ const clearScene = async () => {
     // Incrementar generación para invalidar cargas asíncronas pendientes
     activeLoadGeneration++;
     activeProjectId.value = null;
+    activeProjectName.value = '';
 
     // 1. Limpiar highlighter y selecciones activas (con timeout de seguridad para evitar bloqueos)
     if (highlighter) {
@@ -1148,6 +1117,7 @@ const loadBackendProject = async (proj: BackendProject) => {
     // Establecer nueva generación y registrar projectId activo
     const currentGen = ++activeLoadGeneration;
     activeProjectId.value = proj.id;
+    activeProjectName.value = proj.name || proj.fileName || '';
 
     if (!proj.parts || proj.parts.length === 0) {
         appLogger.warn(`El proyecto "${proj.name || proj.fileName}" no contiene modelos FRAG listos.`);
@@ -1313,6 +1283,7 @@ const loadBackendModel = async (model: BackendModelItem) => {
     await clearScene();
     const currentGen = ++activeLoadGeneration;
     activeProjectId.value = model.projectId || model.id;
+    activeProjectName.value = model.projectName || model.name || '';
 
     isLoading.value = true;
     isBackendProcessing.value = true;
@@ -1419,15 +1390,46 @@ const handleLogout = async () => {
     appLogger.info('Sesión cerrada.');
 };
 
+const handleMixedFilesSelected = async (files: File[]) => {
+    const fragFiles = files.filter((f) => f.name.toLowerCase().endsWith('.frag'));
+    const ifcFiles = files.filter((f) => f.name.toLowerCase().endsWith('.ifc'));
+
+    if (fragFiles.length === 0 && ifcFiles.length === 0) {
+        alert('Por favor selecciona uno o varios archivos válidos (.ifc o .frag).');
+        return;
+    }
+
+    if (fragFiles.length > 0) {
+        await loadMultipleFragFiles(fragFiles);
+    }
+
+    if (ifcFiles.length > 0) {
+        if (!currentUser.value) {
+            isLoginModalOpen.value = true;
+            alert('Debe iniciar sesión para procesar archivos IFC.');
+            return;
+        }
+        await processMultipleIfcFiles(ifcFiles, false);
+    }
+};
+
 const onIfcLoadSelected = async (e: Event) => {
+    if (!isAdmin.value) {
+        alert('Acceso restringido: Solo los administradores pueden cargar o procesar archivos de modelos.');
+        return;
+    }
     const input = e.target as HTMLInputElement;
     const files = input.files ? Array.from(input.files) : [];
     if (files.length === 0) return;
-    await processMultipleIfcFiles(files, false);
+    await handleMixedFilesSelected(files);
     input.value = '';
 };
 
 const onIfcConvertSelected = async (e: Event) => {
+    if (!isAdmin.value) {
+        alert('Acceso restringido: Solo los administradores pueden convertir archivos IFC.');
+        return;
+    }
     const input = e.target as HTMLInputElement;
     const files = input.files ? Array.from(input.files) : [];
     if (files.length === 0) return;
@@ -1438,14 +1440,22 @@ const onIfcConvertSelected = async (e: Event) => {
 const onIfcFileSelected = onIfcLoadSelected;
 
 const onFragFileSelected = async (e: Event) => {
+    if (!isAdmin.value) {
+        alert('Acceso restringido: Solo los administradores pueden cargar archivos de modelos.');
+        return;
+    }
     const input = e.target as HTMLInputElement;
     const files = input.files ? Array.from(input.files) : [];
     if (files.length === 0) return;
-    await loadMultipleFragFiles(files);
+    await handleMixedFilesSelected(files);
     input.value = '';
 };
 
 const handleDrop = async (e: DragEvent) => {
+    if (!isAdmin.value) {
+        alert('Acceso restringido: Como usuario normal solo puedes visualizar los modelos asignados a tus proyectos.');
+        return;
+    }
     const fileList = e.dataTransfer?.files;
     if (!fileList || fileList.length === 0) return;
 
@@ -1466,10 +1476,6 @@ const handleDrop = async (e: DragEvent) => {
         if (!currentUser.value) {
             isLoginModalOpen.value = true;
             alert('Debe iniciar sesión para procesar archivos IFC.');
-            return;
-        }
-        if (!isAdmin.value) {
-            alert('Acceso restringido: Solo los administradores pueden procesar o convertir archivos IFC.');
             return;
         }
         await processMultipleIfcFiles(ifcFiles, false);
@@ -1508,10 +1514,11 @@ const loadMultipleFragFiles = async (files: File[]) => {
             }
 
             if (loadedModel) {
-                const modelKey = cleanModelId || loadedModel.modelId || loadedModel.id;
-                if (!fragmentManager.list.has(modelKey)) {
-                    fragmentManager.list.set(modelKey, loadedModel);
+                let modelKey = cleanModelId || loadedModel.modelId || loadedModel.id;
+                if (fragmentManager.list.has(modelKey)) {
+                    modelKey = `${modelKey}_${Date.now()}_${i}`;
                 }
+                fragmentManager.list.set(modelKey, loadedModel);
                 if (world?.camera?.three) {
                     try { loadedModel.useCamera(world.camera.three); } catch {}
                 }
@@ -1610,16 +1617,38 @@ const processMultipleIfcFiles = async (files: File[], autoDownloadFrag: boolean 
                             loadingStage.value = `Inyectando en GPU: ${partName} (${partIdx + 1}/${result.fragmentBuffers.length})...`;
 
                             const cleanModelId = partName.replace(/\.frag$/i, '');
+                            let loadedModel: any = null;
                             try {
-                                await fragmentManager.core.load(partBuffer as any, { modelId: cleanModelId, raw: false });
+                                loadedModel = await fragmentManager.core.load(partBuffer as any, { modelId: cleanModelId, raw: false });
                             } catch {
-                                await fragmentManager.core.load(partBuffer as any, { modelId: cleanModelId, raw: true });
+                                loadedModel = await fragmentManager.core.load(partBuffer as any, { modelId: cleanModelId, raw: true });
+                            }
+
+                            if (loadedModel) {
+                                let modelKey = cleanModelId || loadedModel.modelId || loadedModel.id;
+                                if (fragmentManager.list.has(modelKey)) {
+                                    modelKey = `${modelKey}_${Date.now()}_${partIdx}`;
+                                }
+                                fragmentManager.list.set(modelKey, loadedModel);
+                                if (world?.camera?.three) {
+                                    try { loadedModel.useCamera(world.camera.three); } catch {}
+                                }
+                                if (loadedModel.object && world?.scene?.three && !world.scene.three.children.includes(loadedModel.object)) {
+                                    world.scene.three.add(loadedModel.object);
+                                }
                             }
                             console.log(`[Backend] Modelo fragmentado inyectado en escena 3D: ${partName}`);
 
                             if (autoDownloadFrag) {
                                 downloadFragmentFile(partBuffer, partName);
                             }
+                        }
+
+                        if (updateModelsList) {
+                            updateModelsList();
+                        }
+                        if (updateSpatialTree && fragmentManager) {
+                            updateSpatialTree({ models: Array.from(fragmentManager.list.values()) });
                         }
 
                         // Auto-guardar en IndexedDB local
@@ -1705,9 +1734,35 @@ const processMultipleIfcFiles = async (files: File[], autoDownloadFrag: boolean 
                 const partLabel = fragmentArray.length > 1 ? ` (${partIdx + 1}/${fragmentArray.length})` : '';
                 loadingStage.value = `Cargando Fragments en GPU${partLabel}...`;
                 const cleanModelId = fragFileName.replace(/\.frag$/i, '');
-                await fragmentManager.core.load(fragmentBytes, { modelId: cleanModelId, raw: true });
+                let loadedModel: any = null;
+                try {
+                    loadedModel = await fragmentManager.core.load(fragmentBytes, { modelId: cleanModelId, raw: true });
+                } catch {
+                    loadedModel = await fragmentManager.core.load(fragmentBytes, { modelId: cleanModelId, raw: false });
+                }
+
+                if (loadedModel) {
+                    let modelKey = cleanModelId || loadedModel.modelId || loadedModel.id;
+                    if (fragmentManager.list.has(modelKey)) {
+                        modelKey = `${modelKey}_${Date.now()}_${partIdx}`;
+                    }
+                    fragmentManager.list.set(modelKey, loadedModel);
+                    if (world?.camera?.three) {
+                        try { loadedModel.useCamera(world.camera.three); } catch {}
+                    }
+                    if (loadedModel.object && world?.scene?.three && !world.scene.three.children.includes(loadedModel.object)) {
+                        world.scene.three.add(loadedModel.object);
+                    }
+                }
                 console.log(`[IFC] Modelo renderizado en escena: ${fragFileName}`);
             }
+        }
+
+        if (updateModelsList) {
+            updateModelsList();
+        }
+        if (updateSpatialTree && fragmentManager) {
+            updateSpatialTree({ models: Array.from(fragmentManager.list.values()) });
         }
 
         loadingProgress.value = 100;
@@ -2164,7 +2219,29 @@ const downloadCurrentFrag = async () => {
   box-shadow: 0 0 8px #22c55e !important;
 }
 
-/* Top status bar holding user auth pill and backend status */
+/* Top bar idéntica al prototipo (.vtop) */
+.vtop {
+  position: absolute;
+  top: 18px;
+  left: 20px;
+  right: 20px;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  z-index: 1000;
+  pointer-events: none;
+}
+
+.vtop > * {
+  pointer-events: all;
+}
+
+.vtop-right-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .top-status-bar {
   position: absolute;
   top: 14px;
@@ -2179,13 +2256,13 @@ const downloadCurrentFrag = async () => {
   display: flex;
   align-items: center;
   gap: 8px;
-  background: rgba(15, 23, 42, 0.85);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  padding: 4px 10px;
-  border-radius: 20px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid #e5e9f0;
+  padding: 6px 12px;
+  border-radius: 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
   pointer-events: all;
   user-select: none;
 }
@@ -2214,8 +2291,8 @@ const downloadCurrentFrag = async () => {
 
 .user-name-text {
   font-size: 0.76rem;
-  font-weight: 600;
-  color: #f1f5f9;
+  font-weight: 700;
+  color: #172033;
   max-width: 130px;
   white-space: nowrap;
   overflow: hidden;
@@ -2232,21 +2309,21 @@ const downloadCurrentFrag = async () => {
 }
 
 .user-role-tag.admin {
-  background: rgba(245, 158, 11, 0.2);
-  color: #fbbf24;
-  border: 1px solid rgba(245, 158, 11, 0.3);
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fde68a;
 }
 
 .user-role-tag.user {
-  background: rgba(59, 130, 246, 0.2);
-  color: #93c5fd;
-  border: 1px solid rgba(59, 130, 246, 0.3);
+  background: #eff6ff;
+  color: #1e40af;
+  border: 1px solid #dbeafe;
 }
 
 .auth-action-btn {
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  color: #cbd5e1;
+  background: #ffffff;
+  border: 1px solid #d7dce6;
+  color: #475569;
   padding: 3px 8px;
   border-radius: 6px;
   font-size: 0.72rem;
@@ -2256,6 +2333,36 @@ const downloadCurrentFrag = async () => {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+.auth-action-btn:hover {
+  background: #f1f5f9;
+  color: #172033;
+  border-color: #94a3b8;
+}
+
+.auth-action-btn.logout-btn:hover {
+  background: #fee2e2;
+  color: #b91c1c;
+  border-color: #fca5a5;
+}
+
+.backend-status-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid #e5e9f0;
+  padding: 6px 12px;
+  border-radius: 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #64748b;
+  pointer-events: all;
+  user-select: none;
 }
 
 .auth-action-btn:hover {
@@ -2343,7 +2450,7 @@ const downloadCurrentFrag = async () => {
   animation: hud-blink 1.5s ease-in-out infinite alternate;
 }
 
-/* Botón Plegable Flotante para el Menú Lateral (class parent) */
+/* Botón Plegable Flotante para el Menú Lateral (Menú BIM a la izquierda) */
 .panel-toggle-tab {
   position: absolute;
   top: 18px;

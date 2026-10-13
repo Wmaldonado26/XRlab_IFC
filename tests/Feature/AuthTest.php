@@ -19,7 +19,7 @@ class AuthTest extends TestCase
             ['email' => 'admin@ifcxrlab.local'],
             [
                 'name' => 'Administrador Principal',
-                'password' => Hash::make('Admin1234!'),
+                'password' => Hash::make('Admin2026!*'),
                 'role' => 'admin',
                 'is_active' => true,
             ]
@@ -30,7 +30,7 @@ class AuthTest extends TestCase
     {
         $response = $this->postJson('/api/auth/login', [
             'email' => 'admin@ifcxrlab.local',
-            'password' => 'Admin1234!',
+            'password' => 'Admin2026!*',
         ]);
 
         $response->assertStatus(200)

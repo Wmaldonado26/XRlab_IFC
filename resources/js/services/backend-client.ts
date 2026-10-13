@@ -178,7 +178,7 @@ export async function convertIfcViaBackend(
 
             onProgress({
               percent,
-              stage: 'Subiendo archivo...',
+              stage: 'Subiendo IFC...',
               phase: 'uploading',
               loadedBytes: e.loaded,
               totalBytes: e.total,
@@ -196,7 +196,7 @@ export async function convertIfcViaBackend(
             const data = JSON.parse(xhr.responseText);
             onProgress({
               percent: 100,
-              stage: 'Archivo recibido en el servidor.',
+              stage: 'IFC cargado en el servidor.',
               phase: 'uploaded',
               loadedBytes: file.size,
               totalBytes: file.size,
@@ -250,7 +250,7 @@ export async function convertIfcViaBackend(
 
     onProgress({
       percent: 0,
-      stage: 'Iniciando conversión de entidades IFC...',
+      stage: 'Procesando IFC...',
       phase: 'processing',
     });
 
@@ -260,7 +260,7 @@ export async function convertIfcViaBackend(
         const data = JSON.parse(e.data);
         onProgress({
           percent: typeof data.percent === 'number' ? data.percent : 0,
-          stage: data.stage || 'Procesando modelo IFC...',
+          stage: data.stage || 'Convirtiendo IFC → FRAG...',
           elapsed: data.elapsed,
           phase: 'processing',
         });
@@ -517,14 +517,31 @@ export async function downloadBackendFragments(
   const buffers: ArrayBuffer[] = [];
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
-    let res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/download/${encodeURIComponent(part)}`, { credentials: 'include' });
+    // 1. Try project-scoped download (/api/projects/{projectId}/models/{modelIdOrName}/download)
+    let res = await fetch(
+      `/api/projects/${encodeURIComponent(jobId)}/models/${encodeURIComponent(part)}/download`,
+      { credentials: 'include' }
+    );
     if (!res.ok) {
-      // Fallback 1: try 1-based index
-      res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/download/${i + 1}`, { credentials: 'include' });
+      // 2. Try direct conversion job part download
+      res = await fetch(
+        `/api/jobs/${encodeURIComponent(jobId)}/download/${encodeURIComponent(part)}`,
+        { credentials: 'include' }
+      );
     }
     if (!res.ok) {
-      // Fallback 2: try direct model download
-      res = await fetch(`/api/models/${encodeURIComponent(part)}/download`, { credentials: 'include' });
+      // 3. Try conversion job 1-based index download
+      res = await fetch(
+        `/api/jobs/${encodeURIComponent(jobId)}/download/${i + 1}`,
+        { credentials: 'include' }
+      );
+    }
+    if (!res.ok) {
+      // 4. Try global model download (/api/models/{id}/download)
+      res = await fetch(
+        `/api/models/${encodeURIComponent(part)}/download`,
+        { credentials: 'include' }
+      );
     }
     if (!res.ok) {
       let detail = `HTTP ${res.status}`;
@@ -546,46 +563,154 @@ export async function downloadBackendFragments(
 
 /**
  * Directly uploads a pre-converted .frag file to a project without running conversion.
+ * Tracks real-time upload progress with bytes, speed (MB/s), ETA, and supports AbortSignal.
  * Validates, persists to storage/models/<projectId>/<modelId>/, and registers in SQLite.
  */
 export async function uploadDirectFrag(
   projectId: string,
   file: File,
-  onProgress?: (percent: number) => void
+  onProgress?: ((progress: BackendConversionProgress) => void) | ((percent: number) => void),
+  signal?: AbortSignal
 ): Promise<BackendModelItem> {
   if (!file.name.toLowerCase().endsWith('.frag')) {
     throw new Error('Solo se admiten archivos con extensión .frag.');
   }
 
+  if (signal?.aborted) {
+    throw new DOMException('Carga cancelada por el usuario', 'AbortError');
+  }
+
+  const notifyProgress = (prog: BackendConversionProgress) => {
+    if (!onProgress) return;
+    if (typeof onProgress === 'function') {
+      try {
+        (onProgress as any)(prog);
+      } catch {
+        (onProgress as any)(prog.percent);
+      }
+    }
+  };
+
+  notifyProgress({
+    percent: 0,
+    stage: 'Subiendo FRAG...',
+    phase: 'uploading',
+    loadedBytes: 0,
+    totalBytes: file.size,
+  });
+
   return new Promise<BackendModelItem>((resolve, reject) => {
+    let activeXhr: XMLHttpRequest | null = null;
+    let isAborted = false;
+
+    const onAbort = () => {
+      isAborted = true;
+      if (activeXhr) {
+        try { activeXhr.abort(); } catch {}
+      }
+      reject(new DOMException('Carga cancelada por el usuario', 'AbortError'));
+    };
+
+    if (signal) {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
     const xhr = new XMLHttpRequest();
+    activeXhr = xhr;
     xhr.open('POST', `/api/projects/${encodeURIComponent(projectId)}/models/upload-frag`, true);
     xhr.withCredentials = true;
 
-    if (xhr.upload && onProgress) {
+    let lastTime = performance.now();
+    let lastLoaded = 0;
+    let smoothedSpeed = 0;
+
+    if (xhr.upload) {
       xhr.upload.onprogress = (e) => {
+        if (isAborted) return;
         if (e.lengthComputable) {
-          const percent = Math.round((e.loaded / e.total) * 100);
-          onProgress(percent);
+          const now = performance.now();
+          const timeDiffSec = (now - lastTime) / 1000;
+
+          if (timeDiffSec >= 0.25 || e.loaded === e.total) {
+            const bytesDiff = e.loaded - lastLoaded;
+            const currentSpeed = timeDiffSec > 0 ? bytesDiff / timeDiffSec : 0;
+            smoothedSpeed = smoothedSpeed === 0 ? currentSpeed : smoothedSpeed * 0.7 + currentSpeed * 0.3;
+            lastTime = now;
+            lastLoaded = e.loaded;
+          }
+
+          if (e.loaded >= e.total) {
+            notifyProgress({
+              percent: 100,
+              stage: 'Archivo recibido. Guardando y registrando modelo...',
+              phase: 'uploaded',
+              loadedBytes: e.total,
+              totalBytes: e.total,
+              speedBytesPerSec: smoothedSpeed,
+              remainingSec: 0,
+            });
+            return;
+          }
+
+          const percent = Math.min(99, Math.round((e.loaded / e.total) * 100));
+          const remainingBytes = Math.max(0, e.total - e.loaded);
+          const remainingSec = smoothedSpeed > 0 ? Math.round(remainingBytes / smoothedSpeed) : undefined;
+
+          notifyProgress({
+            percent,
+            stage: 'Subiendo FRAG...',
+            phase: 'uploading',
+            loadedBytes: e.loaded,
+            totalBytes: e.total,
+            speedBytesPerSec: smoothedSpeed,
+            remainingSec,
+          });
         }
       };
     }
 
     xhr.onload = () => {
-      try {
-        const response = JSON.parse(xhr.responseText);
-        if (xhr.status >= 200 && xhr.status < 300 && response.model) {
-          resolve(response.model);
-        } else {
-          reject(new Error(response.error || `Error del servidor (${xhr.status})`));
+      if (isAborted) return;
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          const response = JSON.parse(xhr.responseText);
+          if (response.model) {
+            notifyProgress({
+              percent: 100,
+              stage: '✓ Modelo registrado correctamente.',
+              phase: 'completed',
+              loadedBytes: file.size,
+              totalBytes: file.size,
+            });
+            resolve(response.model);
+          } else {
+            reject(new Error(response.error || `Error del servidor (${xhr.status})`));
+          }
+        } catch (err: any) {
+          reject(new Error(`Respuesta no válida del servidor (${xhr.status}): ${xhr.responseText || err.message}`));
         }
-      } catch (err: any) {
-        reject(new Error(`Respuesta no válida del servidor (${xhr.status}): ${xhr.responseText || err.message}`));
+      } else {
+        let errorMsg = `Error del servidor (${xhr.status})`;
+        try {
+          const errJson = JSON.parse(xhr.responseText);
+          if (errJson.error) errorMsg = errJson.error;
+          else if (errJson.message) errorMsg = errJson.message;
+        } catch {
+          if (xhr.responseText && xhr.responseText.length < 200) {
+            errorMsg = xhr.responseText;
+          }
+        }
+        reject(new Error(errorMsg));
       }
     };
 
     xhr.onerror = () => {
+      if (isAborted) return;
       reject(new Error('Error de conexión de red durante la subida del archivo .frag.'));
+    };
+
+    xhr.onabort = () => {
+      reject(new DOMException('Carga cancelada por el usuario', 'AbortError'));
     };
 
     const formData = new FormData();
@@ -593,5 +718,46 @@ export async function uploadDirectFrag(
     xhr.send(formData);
   });
 }
+
+export interface DashboardStats {
+  activeProjects: number;
+  bimModels: number;
+  users: number;
+  storageBytes: number;
+  storageFormatted: string;
+  recentProjects: BackendProject[];
+  recentActivity: ActivityLogItem[];
+}
+
+export interface ActivityLogItem {
+  id: string;
+  date: string;
+  user: string;
+  action: string;
+  resource: string;
+  projectName?: string;
+  result: string;
+  statusClass: 'ok' | 'warn' | 'err';
+  timestamp: number;
+}
+
+export async function fetchDashboardStats(): Promise<DashboardStats> {
+  const res = await fetch('/api/dashboard/stats', { credentials: 'include' });
+  if (!res.ok) {
+    throw new Error(`Error obteniendo estadísticas (${res.status})`);
+  }
+  const data = await res.json();
+  return data.stats;
+}
+
+export async function fetchActivityLogs(): Promise<ActivityLogItem[]> {
+  const res = await fetch('/api/activity', { credentials: 'include' });
+  if (!res.ok) {
+    throw new Error(`Error obteniendo logs de actividad (${res.status})`);
+  }
+  const data = await res.json();
+  return data.logs || [];
+}
+
 
 

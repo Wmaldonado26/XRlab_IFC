@@ -183,6 +183,36 @@ class ModelTest extends TestCase
         Storage::disk('models')->assertExists("{$this->assignedProject->id}/modulo_a.frag");
     }
 
+    public function test_admin_can_upload_large_150mb_frag_file(): void
+    {
+        // 148 MB = 151552 KB
+        $largeFrag = UploadedFile::fake()->create('modelo-2.frag', 151552, 'application/octet-stream');
+
+        $response = $this->actingAs($this->admin)->postJson(
+            "/api/projects/{$this->assignedProject->id}/models/upload-frag",
+            ['file' => $largeFrag]
+        );
+
+        $response->assertStatus(201)
+            ->assertJson([
+                'status' => 'ok',
+                'model' => [
+                    'name' => 'modelo-2.frag',
+                    'projectId' => $this->assignedProject->id,
+                    'status' => 'ready',
+                ],
+            ]);
+
+        $modelId = $response->json('model.id');
+        $this->assertDatabaseHas('bim_models', [
+            'id' => $modelId,
+            'project_id' => $this->assignedProject->id,
+            'name' => 'modelo-2.frag',
+        ]);
+
+        Storage::disk('models')->assertExists("{$this->assignedProject->id}/modelo-2.frag");
+    }
+
     public function test_upload_rejects_non_frag_file(): void
     {
         $fakePdf = UploadedFile::fake()->create('documento.pdf', 50, 'application/pdf');
@@ -244,5 +274,68 @@ class ModelTest extends TestCase
 
         $delRes = $this->actingAs($this->normalUser)->deleteJson("/api/models/{$model->id}");
         $delRes->assertStatus(403);
+    }
+
+    public function test_user_can_download_project_model_by_filename(): void
+    {
+        $content = 'BINARY_DATA_FRAG_SAMPLE';
+        Storage::disk('models')->put("{$this->assignedProject->id}/modelo-2.frag", $content);
+
+        $model = BimModel::create([
+            'project_id' => $this->assignedProject->id,
+            'name' => 'modelo-2.frag',
+            'storage_path' => "{$this->assignedProject->id}/modelo-2.frag",
+            'size_bytes' => strlen($content),
+            'status' => 'ready',
+        ]);
+
+        $response = $this->actingAs($this->normalUser)->get(
+            "/api/projects/{$this->assignedProject->id}/models/modelo-2.frag/download"
+        );
+
+        $response->assertStatus(200);
+        $this->assertEquals($content, $response->streamedContent());
+    }
+
+    public function test_user_can_download_project_model_by_canonical_uuid(): void
+    {
+        $content = 'BINARY_DATA_FRAG_UUID_SAMPLE';
+        Storage::disk('models')->put("{$this->assignedProject->id}/modelo-2.frag", $content);
+
+        $model = BimModel::create([
+            'project_id' => $this->assignedProject->id,
+            'name' => 'modelo-2.frag',
+            'storage_path' => "{$this->assignedProject->id}/modelo-2.frag",
+            'size_bytes' => strlen($content),
+            'status' => 'ready',
+        ]);
+
+        $response = $this->actingAs($this->normalUser)->get(
+            "/api/projects/{$this->assignedProject->id}/models/{$model->id}/download"
+        );
+
+        $response->assertStatus(200);
+        $this->assertEquals($content, $response->streamedContent());
+    }
+
+    public function test_project_model_download_rejects_model_from_different_project(): void
+    {
+        $content = 'CROSS_PROJECT_CONTENT';
+        Storage::disk('models')->put("{$this->unassignedProject->id}/otro.frag", $content);
+
+        $model = BimModel::create([
+            'project_id' => $this->unassignedProject->id,
+            'name' => 'otro.frag',
+            'storage_path' => "{$this->unassignedProject->id}/otro.frag",
+            'size_bytes' => strlen($content),
+            'status' => 'ready',
+        ]);
+
+        // Attempting to request model of unassignedProject through assignedProject
+        $response = $this->actingAs($this->normalUser)->get(
+            "/api/projects/{$this->assignedProject->id}/models/otro.frag/download"
+        );
+
+        $response->assertStatus(404);
     }
 }

@@ -35,6 +35,11 @@ class Project extends Model
         return $this->hasMany(BimModel::class, 'project_id');
     }
 
+    public function models(): HasMany
+    {
+        return $this->hasMany(BimModel::class, 'project_id');
+    }
+
     public function users(): BelongsToMany
     {
         return $this->belongsToMany(User::class, 'project_user', 'project_id', 'user_id')

@@ -75,7 +75,7 @@ class ModelController extends Controller
         $user = $request->user();
 
         $request->validate([
-            'file' => 'required|file|max:524288', // Max 512 MB
+            'file' => 'required|file|max:4194304', // Max 4 GB
         ]);
 
         try {
@@ -111,6 +111,26 @@ class ModelController extends Controller
 
         try {
             return $this->modelService->downloadModelFile($id, $user);
+        } catch (AccessDeniedHttpException $e) {
+            return response()->json([
+                'error' => $e->getMessage(),
+            ], 403);
+        } catch (ModelNotFoundException $e) {
+            return response()->json([
+                'error' => $e->getMessage(),
+            ], 404);
+        }
+    }
+
+    /**
+     * Stream binary download of .frag file strictly scoped to a project.
+     */
+    public function downloadProjectModel(Request $request, string $projectId, string $modelId): Response
+    {
+        $user = $request->user();
+
+        try {
+            return $this->modelService->downloadProjectModelFile($projectId, $modelId, $user);
         } catch (AccessDeniedHttpException $e) {
             return response()->json([
                 'error' => $e->getMessage(),

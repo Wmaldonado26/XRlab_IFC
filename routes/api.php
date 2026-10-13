@@ -23,17 +23,21 @@ Route::prefix('auth')->group(function () {
 
 // Authenticated Project and Model routes (Row-level permission aware)
 Route::middleware(['auth.ifc'])->group(function () {
+    // Dashboard & Activity
+    Route::get('/dashboard/stats', [ProjectController::class, 'dashboardStats']);
+    Route::get('/activity', [ProjectController::class, 'activityLogs']);
+
     // Projects
     Route::get('/projects', [ProjectController::class, 'index']);
     Route::get('/projects/{id}', [ProjectController::class, 'show']);
+    Route::get('/projects/{projectId}/models/{modelId}/download', [ModelController::class, 'downloadProjectModel']);
 
     // Models
     Route::get('/models', [ModelController::class, 'index']);
     Route::get('/models/{id}', [ModelController::class, 'show']);
     Route::get('/models/{id}/download', [ModelController::class, 'download']);
 
-    // Heavy Processing IFC -> FRAG Conversions
-    Route::post('/convert', [\App\Http\Controllers\ConversionController::class, 'convert']);
+    // Heavy Processing IFC -> FRAG Conversions (Status & Part Downloads for Viewer)
     Route::get('/jobs/{id}/progress', [\App\Http\Controllers\ConversionController::class, 'progress']);
     Route::get('/jobs/{id}/status', [\App\Http\Controllers\ConversionController::class, 'status']);
     Route::get('/jobs/{id}/download/{part}', [\App\Http\Controllers\ConversionController::class, 'download']);
@@ -41,6 +45,9 @@ Route::middleware(['auth.ifc'])->group(function () {
 
 // Admin Only routes
 Route::middleware(['auth.ifc', 'admin.ifc'])->group(function () {
+    // Heavy Processing IFC -> FRAG conversion initiation
+    Route::post('/convert', [\App\Http\Controllers\ConversionController::class, 'convert']);
+
     // User management
     Route::get('/users', [UserController::class, 'index']);
     Route::post('/users', [UserController::class, 'store']);

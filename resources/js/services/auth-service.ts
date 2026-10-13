@@ -45,36 +45,53 @@ function getDefaultHeaders(): Record<string, string> {
   return headers;
 }
 
+let checkSessionPromise: Promise<UserSession | null> | null = null;
+let isInitialCheckDone = false;
+
 /**
  * Checks current session with the Laravel backend (/api/auth/me).
  */
-export async function checkSession(): Promise<UserSession | null> {
-  isAuthLoading.value = true;
-  authError.value = null;
-  try {
-    const res = await fetch('/api/auth/me', {
-      headers: getDefaultHeaders(),
-      credentials: 'include',
-    });
-    if (!res.ok) {
-      currentUser.value = null;
-      return null;
-    }
-    const data = await res.json();
-    if (data.authenticated && data.user) {
-      currentUser.value = data.user;
-      return data.user;
-    } else {
-      currentUser.value = null;
-      return null;
-    }
-  } catch (err) {
-    console.warn('[Auth] Error consultando estado de sesión:', err);
-    currentUser.value = null;
-    return null;
-  } finally {
-    isAuthLoading.value = false;
+export async function checkSession(force = false): Promise<UserSession | null> {
+  if (checkSessionPromise && !force) {
+    return checkSessionPromise;
   }
+
+  // Only show the blocking/initial auth loading screen during initial bootstrap
+  if (!isInitialCheckDone) {
+    isAuthLoading.value = true;
+  }
+  authError.value = null;
+
+  checkSessionPromise = (async () => {
+    try {
+      const res = await fetch('/api/auth/me', {
+        headers: getDefaultHeaders(),
+        credentials: 'include',
+      });
+      if (!res.ok) {
+        currentUser.value = null;
+        return null;
+      }
+      const data = await res.json();
+      if (data.authenticated && data.user) {
+        currentUser.value = data.user;
+        return data.user;
+      } else {
+        currentUser.value = null;
+        return null;
+      }
+    } catch (err) {
+      console.warn('[Auth] Error consultando estado de sesión:', err);
+      currentUser.value = null;
+      return null;
+    } finally {
+      isInitialCheckDone = true;
+      isAuthLoading.value = false;
+      checkSessionPromise = null;
+    }
+  })();
+
+  return checkSessionPromise;
 }
 
 /**

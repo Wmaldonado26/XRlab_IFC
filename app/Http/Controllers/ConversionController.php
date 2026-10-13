@@ -26,7 +26,7 @@ class ConversionController extends Controller
         $user = $request->user();
 
         $request->validate([
-            'file' => 'required|file|max:2097152', // Max 2 GB
+            'file' => 'required|file|max:4194304', // Max 4 GB
         ]);
 
         $projectId = $request->input('projectId') ?: $request->query('projectId');

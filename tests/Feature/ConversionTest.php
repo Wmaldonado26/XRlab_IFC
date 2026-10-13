@@ -55,7 +55,7 @@ class ConversionTest extends TestCase
     {
         $fakeFile = UploadedFile::fake()->create('document.pdf', 100, 'application/pdf');
 
-        $response = $this->actingAs($this->normalUser)->postJson('/api/convert', [
+        $response = $this->actingAs($this->admin)->postJson('/api/convert', [
             'file' => $fakeFile,
         ]);
 
@@ -69,7 +69,7 @@ class ConversionTest extends TestCase
     {
         $fakeIfc = UploadedFile::fake()->create('edificio_prueba.ifc', 50, 'text/plain');
 
-        $response = $this->actingAs($this->normalUser)->postJson('/api/convert', [
+        $response = $this->actingAs($this->admin)->postJson('/api/convert', [
             'file' => $fakeIfc,
             'projectId' => $this->userProject->id,
         ]);
