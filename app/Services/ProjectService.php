@@ -7,7 +7,9 @@ use App\Models\Project;
 use App\Models\User;
 use App\Repositories\ProjectRepository;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
+use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 
 class ProjectService
@@ -137,6 +139,7 @@ class ProjectService
             'name' => $project->name,
             'fileName' => $project->name,
             'description' => $project->description,
+            'imageUrl' => $project->image_url,
             'createdAt' => $project->created_at ? $project->created_at->timestamp * 1000 : null,
             'modelsCount' => count($modelDetails),
             'models' => $modelDetails,
@@ -144,6 +147,105 @@ class ProjectService
             'fileSize' => $totalBytes,
             'totalPartsSizeMB' => number_format($totalBytes / (1024 * 1024), 2, '.', ''),
         ];
+    }
+
+    /**
+     * Upload and save cover image for project.
+     */
+    public function uploadCoverImage(string $id, UploadedFile $file, User $user): array
+    {
+        if (! $user->isAdmin()) {
+            throw new AccessDeniedHttpException('Se requieren permisos de administrador para modificar la portada.');
+        }
+
+        $project = $this->projectRepository->findById($id, true);
+        if (! $project) {
+            throw new ModelNotFoundException("Proyecto con ID {$id} no encontrado.");
+        }
+
+        $ext = strtolower($file->getClientOriginalExtension());
+        if (! in_array($ext, ['jpg', 'jpeg', 'png', 'webp', 'gif', 'svg'])) {
+            throw new \InvalidArgumentException('Formato de imagen no soportado. Se admiten JPG, PNG, WEBP, GIF o SVG.');
+        }
+
+        // Clean up previous cover image files if any
+        $files = Storage::disk('models')->files($project->id);
+        foreach ($files as $f) {
+            if (preg_match('/^' . preg_quote($project->id, '/') . '\/cover(_[0-9]+)?\.[a-z0-9]+$/i', $f)) {
+                Storage::disk('models')->delete($f);
+            }
+        }
+
+        $timestamp = time();
+        $filename = "cover_{$timestamp}.{$ext}";
+        Storage::disk('models')->putFileAs($project->id, $file, $filename);
+
+        $imageUrl = "/api/projects/{$project->id}/cover?t={$timestamp}";
+        $updated = $this->projectRepository->update($project, ['image_url' => $imageUrl]);
+
+        return $this->formatProjectSummary($updated);
+    }
+
+    /**
+     * Delete cover image for project.
+     */
+    public function deleteCoverImage(string $id, User $user): array
+    {
+        if (! $user->isAdmin()) {
+            throw new AccessDeniedHttpException('Se requieren permisos de administrador para eliminar la portada.');
+        }
+
+        $project = $this->projectRepository->findById($id, true);
+        if (! $project) {
+            throw new ModelNotFoundException("Proyecto con ID {$id} no encontrado.");
+        }
+
+        $files = Storage::disk('models')->files($project->id);
+        foreach ($files as $f) {
+            if (preg_match('/^' . preg_quote($project->id, '/') . '\/cover(_[0-9]+)?\.[a-z0-9]+$/i', $f)) {
+                Storage::disk('models')->delete($f);
+            }
+        }
+
+        $updated = $this->projectRepository->update($project, ['image_url' => null]);
+
+        return $this->formatProjectSummary($updated);
+    }
+
+    /**
+     * Retrieve cover image binary file for streaming.
+     */
+    public function getCoverImageFile(string $id): Response
+    {
+        $project = $this->projectRepository->findById($id, false);
+        if (! $project) {
+            throw new ModelNotFoundException("Proyecto con ID {$id} no encontrado.");
+        }
+
+        // Find cover file in project folder
+        $files = Storage::disk('models')->files($id);
+        $coverFile = null;
+        foreach ($files as $f) {
+            if (preg_match('/^' . preg_quote($id, '/') . '\/cover(_[0-9]+)?\.[a-z0-9]+$/i', $f)) {
+                $coverFile = $f;
+                break;
+            }
+        }
+
+        if (! $coverFile || ! Storage::disk('models')->exists($coverFile)) {
+            if (! empty($project->image_url) && str_starts_with($project->image_url, 'http')) {
+                return redirect($project->image_url);
+            }
+            throw new ModelNotFoundException("No se encontró imagen de portada para el proyecto.");
+        }
+
+        $fullPath = Storage::disk('models')->path($coverFile);
+        $mime = Storage::disk('models')->mimeType($coverFile) ?: 'image/jpeg';
+
+        return response()->file($fullPath, [
+            'Content-Type' => $mime,
+            'Cache-Control' => 'public, max-age=86400',
+        ]);
     }
 
     /**

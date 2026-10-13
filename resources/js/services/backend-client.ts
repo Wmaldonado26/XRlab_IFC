@@ -379,6 +379,7 @@ export interface BackendProject {
   name: string;
   fileName: string;
   description: string | null;
+  imageUrl?: string | null;
   createdAt: number;
   modelsCount: number;
   models: BackendModelItem[];
@@ -410,16 +411,63 @@ export async function fetchBackendProject(id: string): Promise<BackendProject> {
   return data.project;
 }
 
-export async function createBackendProject(name: string, description?: string): Promise<BackendProject> {
-  const res = await fetch('/api/projects', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
-    body: JSON.stringify({ name, description }),
-  });
+export async function createBackendProject(
+  name: string,
+  description?: string,
+  coverFile?: File | null
+): Promise<BackendProject> {
+  let res: Response;
+  if (coverFile) {
+    const formData = new FormData();
+    formData.append('name', name);
+    if (description) formData.append('description', description);
+    formData.append('cover', coverFile);
+    res = await fetch('/api/projects', {
+      method: 'POST',
+      credentials: 'include',
+      body: formData,
+    });
+  } else {
+    res = await fetch('/api/projects', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ name, description }),
+    });
+  }
+
   if (!res.ok) {
     const errData = await res.json().catch(() => ({}));
     throw new Error(errData.error || `Error creando proyecto (${res.status})`);
+  }
+  const data = await res.json();
+  return data.project;
+}
+
+export async function uploadProjectCover(projectId: string, file: File): Promise<BackendProject> {
+  const formData = new FormData();
+  formData.append('cover', file);
+  const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/cover`, {
+    method: 'POST',
+    credentials: 'include',
+    body: formData,
+  });
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.error || `Error subiendo imagen de portada (${res.status})`);
+  }
+  const data = await res.json();
+  return data.project;
+}
+
+export async function deleteProjectCover(projectId: string): Promise<BackendProject> {
+  const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/cover`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.error || `Error eliminando imagen de portada (${res.status})`);
   }
   const data = await res.json();
   return data.project;

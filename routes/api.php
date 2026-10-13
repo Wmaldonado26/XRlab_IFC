@@ -30,6 +30,7 @@ Route::middleware(['auth.ifc'])->group(function () {
     // Projects
     Route::get('/projects', [ProjectController::class, 'index']);
     Route::get('/projects/{id}', [ProjectController::class, 'show']);
+    Route::get('/projects/{id}/cover', [ProjectController::class, 'getCover']);
     Route::get('/projects/{projectId}/models/{modelId}/download', [ModelController::class, 'downloadProjectModel']);
 
     // Models
@@ -60,6 +61,8 @@ Route::middleware(['auth.ifc', 'admin.ifc'])->group(function () {
     // Project management
     Route::post('/projects', [ProjectController::class, 'store']);
     Route::match(['put', 'patch'], '/projects/{id}', [ProjectController::class, 'update']);
+    Route::post('/projects/{id}/cover', [ProjectController::class, 'uploadCover']);
+    Route::delete('/projects/{id}/cover', [ProjectController::class, 'deleteCover']);
     Route::delete('/projects/{id}', [ProjectController::class, 'destroy']);
 
     // Direct Model upload and delete (Admin only)

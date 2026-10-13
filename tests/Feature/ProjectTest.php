@@ -205,4 +205,46 @@ class ProjectTest extends TestCase
         $this->assertCount(1, $projects);
         $this->assertEquals('Puente Metropolitano', $projects[0]['name']);
     }
+
+    public function test_admin_can_upload_and_delete_project_cover(): void
+    {
+        $project = Project::create(['name' => 'Fragata ARC Almirante']);
+
+        $file = \Illuminate\Http\UploadedFile::fake()->create('cover.jpg', 100, 'image/jpeg');
+
+        $response = $this->actingAs($this->admin)->postJson("/api/projects/{$project->id}/cover", [
+            'cover' => $file,
+        ]);
+
+        $response->assertStatus(200)
+            ->assertJson([
+                'status' => 'ok',
+            ]);
+
+        $this->assertNotNull($response->json('project.imageUrl'));
+
+        // View cover image
+        $viewRes = $this->actingAs($this->admin)->get("/api/projects/{$project->id}/cover");
+        $viewRes->assertStatus(200);
+
+        // Delete cover image
+        $delRes = $this->actingAs($this->admin)->deleteJson("/api/projects/{$project->id}/cover");
+        $delRes->assertStatus(200)
+            ->assertJson([
+                'status' => 'ok',
+            ]);
+        $this->assertNull($delRes->json('project.imageUrl'));
+    }
+
+    public function test_normal_user_cannot_upload_project_cover(): void
+    {
+        $project = Project::create(['name' => 'Buque Patrullero']);
+        $file = \Illuminate\Http\UploadedFile::fake()->create('cover.png', 100, 'image/png');
+
+        $response = $this->actingAs($this->normalUser)->postJson("/api/projects/{$project->id}/cover", [
+            'cover' => $file,
+        ]);
+
+        $response->assertStatus(403);
+    }
 }

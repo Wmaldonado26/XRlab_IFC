@@ -6,6 +6,7 @@ use App\Services\ProjectService;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 
 class ProjectController extends Controller
@@ -41,9 +42,18 @@ class ProjectController extends Controller
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'description' => 'nullable|string|max:1000',
+            'image_url' => 'nullable|string|max:2048',
+            'imageUrl' => 'nullable|string|max:2048',
+            'cover' => 'nullable|file|mimes:jpg,jpeg,png,webp,gif,svg|max:10240',
+            'image' => 'nullable|file|mimes:jpg,jpeg,png,webp,gif,svg|max:10240',
         ]);
 
         $project = $this->projectService->createProject($validated);
+
+        $coverFile = $request->file('cover') ?? $request->file('image');
+        if ($coverFile) {
+            $project = $this->projectService->uploadCoverImage($project['id'], $coverFile, $request->user());
+        }
 
         return response()->json([
             'status' => 'ok',
@@ -84,6 +94,8 @@ class ProjectController extends Controller
         $validated = $request->validate([
             'name' => 'nullable|string|max:255',
             'description' => 'nullable|string|max:1000',
+            'image_url' => 'nullable|string|max:2048',
+            'imageUrl' => 'nullable|string|max:2048',
         ]);
 
         try {
@@ -97,6 +109,75 @@ class ProjectController extends Controller
             return response()->json([
                 'error' => "Proyecto con ID {$id} no encontrado.",
             ], 404);
+        }
+    }
+
+    /**
+     * Upload or update project cover image (Admin only).
+     */
+    public function uploadCover(Request $request, string $id): JsonResponse
+    {
+        $request->validate([
+            'cover' => 'nullable|file|mimes:jpg,jpeg,png,webp,gif,svg|max:10240',
+            'image' => 'nullable|file|mimes:jpg,jpeg,png,webp,gif,svg|max:10240',
+        ]);
+
+        $file = $request->file('cover') ?? $request->file('image');
+        if (! $file) {
+            return response()->json(['error' => 'No se adjuntó archivo de imagen.'], 422);
+        }
+
+        try {
+            $project = $this->projectService->uploadCoverImage($id, $file, $request->user());
+
+            return response()->json([
+                'status' => 'ok',
+                'message' => 'Imagen de portada actualizada con éxito.',
+                'project' => $project,
+            ]);
+        } catch (AccessDeniedHttpException $e) {
+            return response()->json(['error' => $e->getMessage()], 403);
+        } catch (ModelNotFoundException $e) {
+            return response()->json(['error' => "Proyecto con ID {$id} no encontrado."], 404);
+        } catch (\Exception $e) {
+            return response()->json(['error' => $e->getMessage()], 400);
+        }
+    }
+
+    /**
+     * Delete project cover image (Admin only).
+     */
+    public function deleteCover(Request $request, string $id): JsonResponse
+    {
+        try {
+            $project = $this->projectService->deleteCoverImage($id, $request->user());
+
+            return response()->json([
+                'status' => 'ok',
+                'message' => 'Imagen de portada eliminada con éxito.',
+                'project' => $project,
+            ]);
+        } catch (AccessDeniedHttpException $e) {
+            return response()->json(['error' => $e->getMessage()], 403);
+        } catch (ModelNotFoundException $e) {
+            return response()->json(['error' => "Proyecto con ID {$id} no encontrado."], 404);
+        }
+    }
+
+    /**
+     * Stream binary download/display of project cover image.
+     */
+    public function getCover(Request $request, string $id): Response
+    {
+        $user = $request->user();
+        if ($user && ! $user->hasAccessToProject($id)) {
+            return response()->json(['error' => 'Acceso denegado.'], 403);
+        }
+
+        try {
+            return $this->projectService->getCoverImageFile($id);
+        } catch (ModelNotFoundException $e) {
+            return response()->json(['error' => 'Portada no disponible.'], 404);
         }
     }
 

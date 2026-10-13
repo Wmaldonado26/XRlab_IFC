@@ -19,6 +19,7 @@ class Project extends Model
         'id',
         'name',
         'description',
+        'image_url',
     ];
 
     protected static function booted(): void

@@ -50,10 +50,50 @@
         :key="proj.id"
         class="project-card"
       >
-        <div class="project-cover" :style="{ background: getCoverGradient(index) }">
+        <div
+          class="project-cover"
+          :class="{ 'has-image': Boolean(proj.imageUrl) }"
+          :style="{ background: proj.imageUrl ? undefined : getCoverGradient(index) }"
+        >
+          <!-- Real Project Cover Image -->
+          <img
+            v-if="proj.imageUrl"
+            :src="proj.imageUrl"
+            :alt="proj.name"
+            class="project-cover-image"
+            loading="lazy"
+            @error="onImageError(proj)"
+          />
+          <div v-if="proj.imageUrl" class="project-cover-overlay"></div>
+
           <span class="badge">
             {{ (proj.modelsCount > 0 || (proj.parts && proj.parts.length > 0)) ? 'PROYECTO ACTIVO' : 'SIN MODELOS' }}
           </span>
+
+          <!-- Direct action in cover for admin: add / change image -->
+          <div v-if="isAdmin" class="cover-actions" @click.stop>
+            <button
+              type="button"
+              class="cover-btn"
+              :disabled="uploadingCoverProjectId === proj.id"
+              :title="proj.imageUrl ? 'Cambiar imagen del proyecto' : 'Agregar imagen al proyecto'"
+              @click.stop="triggerCoverUpload(proj)"
+            >
+              <span v-if="uploadingCoverProjectId === proj.id">⏳</span>
+              <span v-else>📷</span>
+              <span>{{ proj.imageUrl ? 'Cambiar foto' : '+ Foto' }}</span>
+            </button>
+            <button
+              v-if="proj.imageUrl"
+              type="button"
+              class="cover-btn btn-remove"
+              :disabled="uploadingCoverProjectId === proj.id"
+              title="Quitar imagen del proyecto"
+              @click.stop="handleDeleteCover(proj)"
+            >
+              ✕
+            </button>
+          </div>
         </div>
 
         <div class="project-body">
@@ -89,6 +129,15 @@
         </div>
       </article>
     </div>
+
+    <!-- Hidden file input for direct cover uploads from card -->
+    <input
+      ref="directCoverInputRef"
+      type="file"
+      accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml"
+      style="display: none;"
+      @change="onDirectCoverSelected"
+    />
 
     <!-- =================================================================== -->
     <!-- MODAL: CREAR PROYECTO (Exacto al prototipo con Carga Real Integrada)-->
@@ -131,6 +180,47 @@
                 placeholder="Detalles del buque, estructura o coordinación..."
                 :disabled="createModelState === 'UPLOADING' || isSubmitting"
               ></textarea>
+            </div>
+
+            <div class="form-group">
+              <label>Imagen de portada (opcional)</label>
+              <div v-if="createCoverPreview" class="cover-upload-preview">
+                <img :src="createCoverPreview" alt="Vista previa de portada" class="cover-upload-thumbnail" />
+                <div style="flex: 1; min-width: 0;">
+                  <strong style="font-size: 13px; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                    {{ createCoverFile?.name }}
+                  </strong>
+                  <span style="font-size: 11px; color: var(--muted);">
+                    {{ createCoverFile ? (createCoverFile.size / 1024).toFixed(0) + ' KB' : '' }}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  class="secondary-btn"
+                  style="padding: 4px 10px; font-size: 12px; color: var(--danger); border-color: #fca5a5;"
+                  :disabled="createModelState === 'UPLOADING' || isSubmitting"
+                  @click="removeCreateCover"
+                >
+                  ✕ Quitar
+                </button>
+              </div>
+              <div
+                v-else
+                class="upload-zone"
+                style="padding: 16px; min-height: auto;"
+                @click="createCoverInputRef?.click()"
+              >
+                <div style="font-size: 22px; margin-bottom: 2px;">🖼️</div>
+                <strong style="font-size: 13px;">Cargar imagen de portada</strong>
+                <span style="font-size: 11.5px;">Archivos JPG, PNG o WEBP (máx. 10 MB)</span>
+                <input
+                  ref="createCoverInputRef"
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml"
+                  style="display: none;"
+                  @change="onCreateCoverSelected"
+                />
+              </div>
             </div>
 
             <div class="form-group">
@@ -230,6 +320,54 @@
             <textarea v-model="editForm.description" rows="3"></textarea>
           </div>
 
+          <div class="form-group" style="margin-top: 15px;">
+            <label>Imagen de portada</label>
+            <div v-if="manageProjectTarget.imageUrl" class="cover-upload-preview">
+              <img :src="manageProjectTarget.imageUrl" alt="Portada actual" class="cover-upload-thumbnail" />
+              <div style="flex: 1; min-width: 0;">
+                <strong style="font-size: 13px; display: block;">Portada personalizada activa</strong>
+                <span style="font-size: 11.5px; color: var(--muted);">Visible en la tarjeta de proyecto</span>
+              </div>
+              <div style="display: flex; gap: 6px;">
+                <button
+                  type="button"
+                  class="secondary-btn"
+                  style="padding: 5px 10px; font-size: 12px;"
+                  :disabled="isSubmitting"
+                  @click="manageCoverInputRef?.click()"
+                >
+                  Cambiar
+                </button>
+                <button
+                  type="button"
+                  class="secondary-btn"
+                  style="padding: 5px 10px; font-size: 12px; color: var(--danger); border-color: #fca5a5;"
+                  :disabled="isSubmitting"
+                  @click="onManageCoverDelete"
+                >
+                  ✕ Quitar
+                </button>
+              </div>
+            </div>
+            <div
+              v-else
+              class="upload-zone"
+              style="padding: 16px; min-height: auto;"
+              @click="manageCoverInputRef?.click()"
+            >
+              <div style="font-size: 22px; margin-bottom: 2px;">🖼️</div>
+              <strong style="font-size: 13px;">Agregar imagen de portada</strong>
+              <span style="font-size: 11.5px;">Haz clic para asignar una foto representativa (JPG, PNG o WEBP)</span>
+            </div>
+            <input
+              ref="manageCoverInputRef"
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml"
+              style="display: none;"
+              @change="onManageCoverSelected"
+            />
+          </div>
+
           <div style="margin-top: 20px; padding: 14px; background: #fef2f2; border: 1px solid #fee2e2; border-radius: 11px;">
             <b style="color: var(--danger); font-size: 13px;">Zona de peligro</b>
             <p style="font-size: 12px; color: #7f1d1d; margin: 5px 0 10px;">
@@ -266,6 +404,8 @@ import {
   createBackendProject,
   updateBackendProject,
   deleteBackendProject,
+  uploadProjectCover,
+  deleteProjectCover,
   uploadDirectFrag,
   convertIfcViaBackend,
   type BackendProject,
@@ -300,6 +440,17 @@ const createProgress = ref({
   speedBytesPerSec: 0,
   remainingSec: 0,
 });
+
+// Cover image state
+const createCoverFile = ref<File | null>(null);
+const createCoverPreview = ref<string | null>(null);
+const createCoverInputRef = ref<HTMLInputElement | null>(null);
+
+const directCoverInputRef = ref<HTMLInputElement | null>(null);
+const targetCoverProject = ref<BackendProject | null>(null);
+const uploadingCoverProjectId = ref<string | null>(null);
+
+const manageCoverInputRef = ref<HTMLInputElement | null>(null);
 
 // Manage project form state
 const showManageModal = ref(false);
@@ -364,10 +515,38 @@ function onSearchInput() {
 function openCreateModal() {
   createForm.value = { name: '', description: '' };
   createFile.value = null;
+  createCoverFile.value = null;
+  if (createCoverPreview.value) {
+    URL.revokeObjectURL(createCoverPreview.value);
+    createCoverPreview.value = null;
+  }
   createdProject.value = null;
   createModelState.value = 'IDLE';
   createError.value = '';
   showCreateModal.value = true;
+}
+
+function onCreateCoverSelected(e: Event) {
+  const input = e.target as HTMLInputElement;
+  if (input.files && input.files.length > 0) {
+    const file = input.files[0];
+    createCoverFile.value = file;
+    if (createCoverPreview.value) {
+      URL.revokeObjectURL(createCoverPreview.value);
+    }
+    createCoverPreview.value = URL.createObjectURL(file);
+  }
+}
+
+function removeCreateCover() {
+  createCoverFile.value = null;
+  if (createCoverPreview.value) {
+    URL.revokeObjectURL(createCoverPreview.value);
+    createCoverPreview.value = null;
+  }
+  if (createCoverInputRef.value) {
+    createCoverInputRef.value.value = '';
+  }
 }
 
 function onFileSelected(e: Event) {
@@ -418,7 +597,8 @@ async function submitCreateProject() {
     if (!target) {
       target = await createBackendProject(
         createForm.value.name.trim(),
-        createForm.value.description.trim() || undefined
+        createForm.value.description.trim() || undefined,
+        createCoverFile.value
       );
       createdProject.value = target;
     }
@@ -487,12 +667,88 @@ async function submitCreateProject() {
 }
 
 function openManageModal(proj: BackendProject) {
-  manageProjectTarget.value = proj;
+  manageProjectTarget.value = { ...proj };
   editForm.value = {
     name: proj.name,
     description: proj.description || '',
   };
   showManageModal.value = true;
+}
+
+function triggerCoverUpload(proj: BackendProject) {
+  targetCoverProject.value = proj;
+  directCoverInputRef.value?.click();
+}
+
+async function onDirectCoverSelected(e: Event) {
+  const input = e.target as HTMLInputElement;
+  if (!input.files || input.files.length === 0 || !targetCoverProject.value) return;
+  const file = input.files[0];
+  const proj = targetCoverProject.value;
+  uploadingCoverProjectId.value = proj.id;
+  try {
+    const updated = await uploadProjectCover(proj.id, file);
+    emit('toast', `Imagen de portada actualizada para "${proj.name}".`);
+    await loadProjects();
+  } catch (err: any) {
+    alert(`Error subiendo imagen: ${err.message}`);
+  } finally {
+    uploadingCoverProjectId.value = null;
+    targetCoverProject.value = null;
+    input.value = '';
+  }
+}
+
+async function handleDeleteCover(proj: BackendProject) {
+  if (!confirm(`¿Deseas quitar la imagen de portada del proyecto "${proj.name}"?`)) return;
+  uploadingCoverProjectId.value = proj.id;
+  try {
+    await deleteProjectCover(proj.id);
+    emit('toast', `Imagen de portada eliminada de "${proj.name}".`);
+    await loadProjects();
+  } catch (err: any) {
+    alert(`Error eliminando portada: ${err.message}`);
+  } finally {
+    uploadingCoverProjectId.value = null;
+  }
+}
+
+async function onManageCoverSelected(e: Event) {
+  const input = e.target as HTMLInputElement;
+  if (!input.files || input.files.length === 0 || !manageProjectTarget.value) return;
+  const file = input.files[0];
+  isSubmitting.value = true;
+  try {
+    const updated = await uploadProjectCover(manageProjectTarget.value.id, file);
+    manageProjectTarget.value = updated;
+    emit('toast', `Imagen de portada actualizada para "${updated.name}".`);
+    await loadProjects();
+  } catch (err: any) {
+    alert(`Error actualizando portada: ${err.message}`);
+  } finally {
+    isSubmitting.value = false;
+    input.value = '';
+  }
+}
+
+async function onManageCoverDelete() {
+  if (!manageProjectTarget.value) return;
+  if (!confirm('¿Deseas quitar la imagen de portada del proyecto?')) return;
+  isSubmitting.value = true;
+  try {
+    const updated = await deleteProjectCover(manageProjectTarget.value.id);
+    manageProjectTarget.value = updated;
+    emit('toast', 'Imagen de portada eliminada.');
+    await loadProjects();
+  } catch (err: any) {
+    alert(`Error eliminando portada: ${err.message}`);
+  } finally {
+    isSubmitting.value = false;
+  }
+}
+
+function onImageError(proj: BackendProject) {
+  proj.imageUrl = null;
 }
 
 async function submitUpdateProject() {
