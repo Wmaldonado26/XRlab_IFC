@@ -615,11 +615,18 @@ async function submitCreateProject() {
         const modelItem = await uploadDirectFrag(
           target.id,
           file,
-          (prog) => {
+          (prog: any) => {
             if (prog.phase === 'uploading') createModelState.value = 'UPLOADING';
             else if (prog.phase === 'uploaded') createModelState.value = 'UPLOADED';
             else if (prog.phase === 'completed') createModelState.value = 'COMPLETED';
-            createProgress.value = { ...prog };
+            createProgress.value = {
+              percent: typeof prog.percent === 'number' ? prog.percent : 0,
+              stage: prog.stage || '',
+              loadedBytes: prog.loadedBytes || 0,
+              totalBytes: prog.totalBytes || 0,
+              speedBytesPerSec: prog.speedBytesPerSec || 0,
+              remainingSec: prog.remainingSec || 0,
+            };
           },
           createAbortController.signal
         );
@@ -630,12 +637,19 @@ async function submitCreateProject() {
         // IFC Conversion flow
         const result = await convertIfcViaBackend(
           file,
-          (prog) => {
+          (prog: any) => {
             if (prog.phase === 'uploading') createModelState.value = 'UPLOADING';
             else if (prog.phase === 'uploaded') createModelState.value = 'UPLOADED';
             else if (prog.phase === 'processing') createModelState.value = 'PROCESSING';
             else if (prog.phase === 'completed') createModelState.value = 'COMPLETED';
-            createProgress.value = { ...prog };
+            createProgress.value = {
+              percent: typeof prog.percent === 'number' ? prog.percent : 0,
+              stage: prog.stage || '',
+              loadedBytes: prog.loadedBytes || 0,
+              totalBytes: prog.totalBytes || 0,
+              speedBytesPerSec: prog.speedBytesPerSec || 0,
+              remainingSec: prog.remainingSec || 0,
+            };
           },
           target.id,
           createAbortController.signal

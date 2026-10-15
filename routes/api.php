@@ -49,6 +49,13 @@ Route::middleware(['auth.ifc', 'admin.ifc'])->group(function () {
     // Heavy Processing IFC -> FRAG conversion initiation
     Route::post('/convert', [\App\Http\Controllers\ConversionController::class, 'convert']);
 
+    // Resumable Chunked Uploads for Large IFC files (> 100MB up to multi-GB)
+    Route::post('/upload/init', [\App\Http\Controllers\ConversionController::class, 'initUpload']);
+    Route::post('/upload/chunk', [\App\Http\Controllers\ConversionController::class, 'chunkUpload']);
+    Route::get('/upload/status/{uploadId}', [\App\Http\Controllers\ConversionController::class, 'uploadStatus']);
+    Route::post('/upload/complete', [\App\Http\Controllers\ConversionController::class, 'completeUpload']);
+    Route::delete('/upload/cancel/{uploadId}', [\App\Http\Controllers\ConversionController::class, 'cancelUpload']);
+
     // User management
     Route::get('/users', [UserController::class, 'index']);
     Route::post('/users', [UserController::class, 'store']);

@@ -1692,11 +1692,12 @@ const processMultipleIfcFiles = async (files: File[], autoDownloadFrag: boolean 
                             }
                         });
 
-                        lastFragmentBuffers = result.fragmentBuffers;
-                        lastFragmentBytes = result.fragmentBuffers[0] || null;
+                        const isMobileDevice = isMobileOrTabletDevice();
+                        const totalFragMB = parseFloat(result.totalSizeMB || '0');
 
                         for (let partIdx = 0; partIdx < result.fragmentBuffers.length; partIdx++) {
                             const partBuffer = result.fragmentBuffers[partIdx];
+                            if (!partBuffer) continue;
                             const partName = result.parts[partIdx] || `Part${partIdx + 1}.frag`;
                             loadingStage.value = `Inyectando en GPU: ${partName} (${partIdx + 1}/${result.fragmentBuffers.length})...`;
 
@@ -1726,6 +1727,9 @@ const processMultipleIfcFiles = async (files: File[], autoDownloadFrag: boolean 
                             if (autoDownloadFrag) {
                                 downloadFragmentFile(partBuffer, partName);
                             }
+
+                            // Liberar memoria cruda de este fragmento inmediatamente
+                            result.fragmentBuffers[partIdx] = null as any;
                         }
 
                         if (updateModelsList) {
@@ -1733,12 +1737,15 @@ const processMultipleIfcFiles = async (files: File[], autoDownloadFrag: boolean 
                         }
                         refreshSpatialTreeSafely(Array.from(fragmentManager.list.values()));
 
-                        // Auto-guardar en IndexedDB local
-                        saveProjectFragments(
-                            result.jobId,
-                            file.name,
-                            result.fragmentBuffers.map((b) => b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer)
-                        ).catch(console.warn);
+                        // Auto-guardar en IndexedDB local sólo si es de tamaño moderado (<60MB) y escritorio
+                        if (!isMobileDevice && totalFragMB > 0 && totalFragMB < 60) {
+                            try {
+                                const validBuffers = result.fragmentBuffers.filter(Boolean).map((b) => b.buffer);
+                                if (validBuffers.length > 0) {
+                                    saveProjectFragments(result.jobId, file.name, validBuffers).catch(console.warn);
+                                }
+                            } catch {}
+                        }
 
                         loadingProgress.value = 100;
                         loadingStage.value = 'Encuadrando vista de cámara...';

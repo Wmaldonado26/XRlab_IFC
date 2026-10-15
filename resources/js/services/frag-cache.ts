@@ -11,7 +11,7 @@ const STORE_NAME = 'fragment_buffers';
 interface CachedProjectRecord {
   id: string;
   name: string;
-  parts: ArrayBuffer[];
+  parts: ArrayBufferLike[];
   partNames?: string[];
   totalBytes: number;
   timestamp: number;
@@ -36,7 +36,7 @@ function openDB(): Promise<IDBDatabase> {
 export async function saveProjectFragments(
   id: string,
   name: string,
-  parts: ArrayBuffer[],
+  parts: ArrayBufferLike[],
   partNames?: string[]
 ): Promise<void> {
   try {

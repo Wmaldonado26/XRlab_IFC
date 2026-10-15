@@ -716,7 +716,7 @@
     <div
       v-if="showAddModelModal && activeProjectForModel"
       class="modalback show"
-      @click.self="!isConvertingIfc && !isUploadingFrag && ifcState !== 'UPLOADING' && ifcState !== 'PROCESSING' ? (showAddModelModal = false) : null"
+      @click.self="!isConvertingIfc && fragState !== 'UPLOADING' && ifcState !== 'UPLOADING' && ifcState !== 'PROCESSING' ? (showAddModelModal = false) : null"
     >
       <div class="modal" style="max-width: 650px;">
         <div class="modalhead">
@@ -727,7 +727,7 @@
           <button
             type="button"
             class="close"
-            :disabled="isConvertingIfc || isUploadingFrag || ifcState === 'UPLOADING' || ifcState === 'PROCESSING'"
+            :disabled="isConvertingIfc || fragState === 'UPLOADING' || ifcState === 'UPLOADING' || ifcState === 'PROCESSING'"
             @click="showAddModelModal = false"
           >
             ×
@@ -1337,7 +1337,7 @@ async function submitCreateProject() {
         const modelItem = await uploadDirectFrag(
           targetProject.id,
           file,
-          (progress) => {
+          (progress: any) => {
             if (progress.phase === 'uploading') createModelState.value = 'UPLOADING';
             else if (progress.phase === 'uploaded') createModelState.value = 'UPLOADED';
             else if (progress.phase === 'completed') createModelState.value = 'COMPLETED';
@@ -1629,7 +1629,7 @@ async function startFragUpload() {
     const model = await uploadDirectFrag(
       activeProjectForModel.value.id,
       fragFile.value,
-      (progress) => {
+      (progress: any) => {
         if (progress.phase === 'uploading') fragState.value = 'UPLOADING';
         else if (progress.phase === 'uploaded') fragState.value = 'UPLOADED';
         else if (progress.phase === 'completed') fragState.value = 'COMPLETED';

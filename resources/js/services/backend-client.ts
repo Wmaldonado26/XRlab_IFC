@@ -95,6 +95,253 @@ export function formatRemainingTime(seconds: number): string {
  * Uploads massive IFC file to backend via XMLHttpRequest tracking REAL upload progress,
  * and then subscribes to Server-Sent Events (SSE) for server-side IFC -> FRAG processing.
  */
+/**
+ * Uploads massive IFC files to backend using chunked resumable uploads (/api/upload/*).
+ * Never keeps multi-GB files in memory; slices on-demand 15 MB chunks.
+ * Tracks accurate upload speed, ETA, supports pause/resume and user cancellation.
+ */
+export async function uploadIfcChunked(
+  file: File,
+  projectId?: string,
+  onProgress?: (progress: BackendConversionProgress) => void,
+  signal?: AbortSignal
+): Promise<{ jobId: string; progressUrl: string; targetProjectId?: string }> {
+  if (signal?.aborted) {
+    throw new DOMException('Carga cancelada por el usuario', 'AbortError');
+  }
+
+  const CHUNK_SIZE = 15 * 1024 * 1024; // 15 MB per chunk
+  const totalBytes = file.size;
+  const totalChunks = Math.max(1, Math.ceil(totalBytes / CHUNK_SIZE));
+
+  onProgress?.({
+    percent: 0,
+    stage: 'Iniciando sesión de carga por partes...',
+    phase: 'uploading',
+    loadedBytes: 0,
+    totalBytes,
+  });
+
+  // 1. Initialize chunked upload session
+  const initRes = await fetch('/api/upload/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({
+      fileName: file.name,
+      totalBytes,
+      totalChunks,
+      chunkSize: CHUNK_SIZE,
+      projectId: projectId || null,
+    }),
+    signal,
+  });
+
+  if (!initRes.ok) {
+    let errorMsg = `Error al iniciar carga por partes (${initRes.status})`;
+    try {
+      const errJson = await initRes.json();
+      if (errJson.error) errorMsg = errJson.error;
+    } catch {}
+    throw new Error(errorMsg);
+  }
+
+  const initData = await initRes.json();
+  const uploadId: string = initData.uploadId;
+  const targetProjectId: string = initData.projectId;
+
+  let activeXhr: XMLHttpRequest | null = null;
+  let isCancelled = false;
+
+  const onAbort = () => {
+    isCancelled = true;
+    if (activeXhr) {
+      try { activeXhr.abort(); } catch {}
+    }
+    fetch(`/api/upload/cancel/${encodeURIComponent(uploadId)}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    }).catch(() => {});
+  };
+
+  if (signal) {
+    signal.addEventListener('abort', onAbort, { once: true });
+  }
+
+  try {
+    // 2. Query status to support resumption of previously uploaded chunks
+    let alreadyUploaded: number[] = [];
+    try {
+      const statusRes = await fetch(`/api/upload/status/${encodeURIComponent(uploadId)}`, {
+        credentials: 'include',
+        signal,
+      });
+      if (statusRes.ok) {
+        const statusData = await statusRes.json();
+        if (Array.isArray(statusData.uploadedChunks)) {
+          alreadyUploaded = statusData.uploadedChunks;
+        }
+      }
+    } catch {}
+
+    let uploadedBytesTotal = alreadyUploaded.length * CHUNK_SIZE;
+    let lastTime = performance.now();
+    let lastLoadedBytes = uploadedBytesTotal;
+    let smoothedSpeed = 0;
+
+    // 3. Upload each chunk sequentially
+    for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
+      if (isCancelled || signal?.aborted) {
+        throw new DOMException('Carga cancelada por el usuario', 'AbortError');
+      }
+
+      if (alreadyUploaded.includes(chunkIdx)) {
+        continue;
+      }
+
+      const start = chunkIdx * CHUNK_SIZE;
+      const end = Math.min(totalBytes, start + CHUNK_SIZE);
+      const chunkBlob = file.slice(start, end);
+
+      let chunkUploaded = false;
+      let retries = 0;
+      const maxRetries = 3;
+
+      while (!chunkUploaded && retries < maxRetries) {
+        if (isCancelled || signal?.aborted) {
+          throw new DOMException('Carga cancelada por el usuario', 'AbortError');
+        }
+
+        try {
+          await new Promise<void>((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            activeXhr = xhr;
+            xhr.open('POST', '/api/upload/chunk', true);
+            xhr.withCredentials = true;
+
+            let prevChunkLoaded = 0;
+
+            if (xhr.upload) {
+              xhr.upload.onprogress = (e) => {
+                if (isCancelled) return;
+                if (e.lengthComputable) {
+                  const chunkDelta = e.loaded - prevChunkLoaded;
+                  prevChunkLoaded = e.loaded;
+                  const currentTotalLoaded = start + e.loaded;
+
+                  const now = performance.now();
+                  const timeDiffSec = (now - lastTime) / 1000;
+                  if (timeDiffSec >= 0.25 || currentTotalLoaded >= totalBytes) {
+                    const bytesDiff = currentTotalLoaded - lastLoadedBytes;
+                    const instantSpeed = timeDiffSec > 0 ? bytesDiff / timeDiffSec : 0;
+                    smoothedSpeed = smoothedSpeed === 0 ? instantSpeed : smoothedSpeed * 0.7 + instantSpeed * 0.3;
+                    lastTime = now;
+                    lastLoadedBytes = currentTotalLoaded;
+                  }
+
+                  const percent = Math.min(99, Math.round((currentTotalLoaded / totalBytes) * 100));
+                  const remainingBytes = Math.max(0, totalBytes - currentTotalLoaded);
+                  const remainingSec = smoothedSpeed > 0 ? Math.round(remainingBytes / smoothedSpeed) : undefined;
+
+                  onProgress?.({
+                    percent,
+                    stage: `Subiendo parte ${chunkIdx + 1}/${totalChunks}...`,
+                    phase: 'uploading',
+                    loadedBytes: currentTotalLoaded,
+                    totalBytes,
+                    speedBytesPerSec: smoothedSpeed,
+                    remainingSec,
+                  });
+                }
+              };
+            }
+
+            xhr.onload = () => {
+              if (isCancelled) return;
+              if (xhr.status >= 200 && xhr.status < 300) {
+                chunkUploaded = true;
+                resolve();
+              } else {
+                let errorMsg = `Error al subir parte ${chunkIdx} (${xhr.status})`;
+                try {
+                  const errJson = JSON.parse(xhr.responseText);
+                  if (errJson.error) errorMsg = errJson.error;
+                } catch {}
+                reject(new Error(errorMsg));
+              }
+            };
+
+            xhr.onerror = () => {
+              if (isCancelled) return;
+              reject(new Error(`Error de red al subir parte ${chunkIdx}`));
+            };
+
+            xhr.onabort = () => {
+              reject(new DOMException('Carga cancelada por el usuario', 'AbortError'));
+            };
+
+            const formData = new FormData();
+            formData.append('uploadId', uploadId);
+            formData.append('chunkIndex', String(chunkIdx));
+            formData.append('file', chunkBlob, `${file.name}.part${chunkIdx}`);
+            xhr.send(formData);
+          });
+        } catch (err: any) {
+          retries++;
+          if (retries >= maxRetries || isCancelled || signal?.aborted) {
+            throw err;
+          }
+          await new Promise((r) => setTimeout(r, 1000));
+        } finally {
+          activeXhr = null;
+        }
+      }
+    }
+
+    onProgress?.({
+      percent: 100,
+      stage: 'Todas las partes subidas. Ensamblando y verificando integridad...',
+      phase: 'uploaded',
+      loadedBytes: totalBytes,
+      totalBytes,
+    });
+
+    // 4. Complete upload and trigger conversion
+    const completeRes = await fetch('/api/upload/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ uploadId }),
+      signal,
+    });
+
+    if (!completeRes.ok) {
+      let errorMsg = `Error al ensamblar archivo en el servidor (${completeRes.status})`;
+      try {
+        const errJson = await completeRes.json();
+        if (errJson.error) errorMsg = errJson.error;
+      } catch {}
+      throw new Error(errorMsg);
+    }
+
+    const completeData = await completeRes.json();
+    return {
+      jobId: completeData.jobId,
+      progressUrl: completeData.progressUrl,
+      targetProjectId,
+    };
+  } finally {
+    if (signal) {
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
+}
+
+/**
+ * Uploads massive IFC file to backend via resumable chunked upload or direct stream,
+ * tracking REAL upload progress, and then subscribes to Server-Sent Events (SSE) or polling
+ * for server-side IFC -> FRAG processing.
+ */
 export async function convertIfcViaBackend(
   file: File,
   onProgress: (progress: BackendConversionProgress) => void,
@@ -105,148 +352,165 @@ export async function convertIfcViaBackend(
     throw new DOMException('Carga cancelada por el usuario', 'AbortError');
   }
 
-  onProgress({
-    percent: 0,
-    stage: 'Iniciando subida...',
-    phase: 'uploading',
-    loadedBytes: 0,
-    totalBytes: file.size,
-  });
-
-  const formData = new FormData();
-  formData.append('file', file, file.name);
-  if (projectId) {
-    formData.append('projectId', projectId);
-  }
-
-  const url = projectId ? `/api/convert?projectId=${encodeURIComponent(projectId)}` : '/api/convert';
-
-  // 1. Upload stream to backend using XMLHttpRequest with real upload progress
-  let activeXhr: XMLHttpRequest | null = null;
-  let activeEventSource: EventSource | null = null;
-  let jobIdCreated: string | null = null;
-  let isAborted = false;
-
-  const onAbort = () => {
-    isAborted = true;
-    if (activeXhr) {
-      try { activeXhr.abort(); } catch {}
-    }
-    if (activeEventSource) {
-      try { activeEventSource.close(); } catch {}
-    }
-    if (jobIdCreated) {
-      fetch(`/api/jobs/${jobIdCreated}`, { method: 'DELETE', credentials: 'include' }).catch(() => {});
-    }
-  };
-
-  if (signal) {
-    signal.addEventListener('abort', onAbort, { once: true });
-  }
-
+  // Files >= 15 MB (up to 3.58+ GB) always use resumable chunked upload to bypass all HTTP/PHP payload limits
+  const USE_CHUNKED = file.size >= 15 * 1024 * 1024;
   let uploadResponseData: { jobId: string; progressUrl: string };
 
-  try {
-    uploadResponseData = await new Promise<{ jobId: string; progressUrl: string }>((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      activeXhr = xhr;
-      xhr.open('POST', url, true);
-      xhr.withCredentials = true;
+  if (USE_CHUNKED) {
+    uploadResponseData = await uploadIfcChunked(file, projectId, onProgress, signal);
+  } else {
+    // Direct upload for small files under 15MB
+    onProgress({
+      percent: 0,
+      stage: 'Iniciando subida...',
+      phase: 'uploading',
+      loadedBytes: 0,
+      totalBytes: file.size,
+    });
 
-      let lastTime = performance.now();
-      let lastLoaded = 0;
-      let smoothedSpeed = 0;
+    const formData = new FormData();
+    formData.append('file', file, file.name);
+    if (projectId) {
+      formData.append('projectId', projectId);
+    }
 
-      if (xhr.upload) {
-        xhr.upload.onprogress = (e) => {
-          if (isAborted) return;
-          if (e.lengthComputable) {
-            const now = performance.now();
-            const timeDiffSec = (now - lastTime) / 1000;
+    const url = projectId ? `/api/convert?projectId=${encodeURIComponent(projectId)}` : '/api/convert';
 
-            if (timeDiffSec >= 0.25 || e.loaded === e.total) {
-              const bytesDiff = e.loaded - lastLoaded;
-              const currentSpeed = timeDiffSec > 0 ? bytesDiff / timeDiffSec : 0;
-              smoothedSpeed = smoothedSpeed === 0 ? currentSpeed : smoothedSpeed * 0.7 + currentSpeed * 0.3;
-              lastTime = now;
-              lastLoaded = e.loaded;
+    let activeXhr: XMLHttpRequest | null = null;
+    let isAborted = false;
+
+    const onAbort = () => {
+      isAborted = true;
+      if (activeXhr) {
+        try { activeXhr.abort(); } catch {}
+      }
+    };
+
+    if (signal) {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    try {
+      uploadResponseData = await new Promise<{ jobId: string; progressUrl: string }>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        activeXhr = xhr;
+        xhr.open('POST', url, true);
+        xhr.withCredentials = true;
+
+        let lastTime = performance.now();
+        let lastLoaded = 0;
+        let smoothedSpeed = 0;
+
+        if (xhr.upload) {
+          xhr.upload.onprogress = (e) => {
+            if (isAborted) return;
+            if (e.lengthComputable) {
+              const now = performance.now();
+              const timeDiffSec = (now - lastTime) / 1000;
+
+              if (timeDiffSec >= 0.25 || e.loaded === e.total) {
+                const bytesDiff = e.loaded - lastLoaded;
+                const currentSpeed = timeDiffSec > 0 ? bytesDiff / timeDiffSec : 0;
+                smoothedSpeed = smoothedSpeed === 0 ? currentSpeed : smoothedSpeed * 0.7 + currentSpeed * 0.3;
+                lastTime = now;
+                lastLoaded = e.loaded;
+              }
+
+              const percent = Math.min(99, Math.round((e.loaded / e.total) * 100));
+              const remainingBytes = Math.max(0, e.total - e.loaded);
+              const remainingSec = smoothedSpeed > 0 ? Math.round(remainingBytes / smoothedSpeed) : undefined;
+
+              onProgress({
+                percent,
+                stage: 'Subiendo IFC...',
+                phase: 'uploading',
+                loadedBytes: e.loaded,
+                totalBytes: e.total,
+                speedBytesPerSec: smoothedSpeed,
+                remainingSec,
+              });
             }
+          };
+        }
 
-            const percent = Math.min(99, Math.round((e.loaded / e.total) * 100));
-            const remainingBytes = Math.max(0, e.total - e.loaded);
-            const remainingSec = smoothedSpeed > 0 ? Math.round(remainingBytes / smoothedSpeed) : undefined;
-
-            onProgress({
-              percent,
-              stage: 'Subiendo IFC...',
-              phase: 'uploading',
-              loadedBytes: e.loaded,
-              totalBytes: e.total,
-              speedBytesPerSec: smoothedSpeed,
-              remainingSec,
-            });
+        xhr.onload = () => {
+          if (isAborted) return;
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              const data = JSON.parse(xhr.responseText);
+              onProgress({
+                percent: 100,
+                stage: 'IFC cargado en el servidor.',
+                phase: 'uploaded',
+                loadedBytes: file.size,
+                totalBytes: file.size,
+              });
+              resolve(data);
+            } catch {
+              reject(new Error('No se pudo procesar la respuesta del servidor.'));
+            }
+          } else {
+            let errorMsg = 'No se pudo cargar el archivo.';
+            try {
+              const errJson = JSON.parse(xhr.responseText);
+              if (errJson.error) errorMsg = errJson.error;
+              else if (errJson.message) errorMsg = errJson.message;
+            } catch {}
+            reject(new Error(errorMsg));
           }
         };
+
+        xhr.onerror = () => {
+          if (isAborted) return;
+          reject(new Error('No se pudo cargar el archivo. Comprueba la conexión.'));
+        };
+
+        xhr.onabort = () => {
+          reject(new DOMException('Carga cancelada por el usuario', 'AbortError'));
+        };
+
+        xhr.send(formData);
+      });
+    } finally {
+      activeXhr = null;
+      if (signal) {
+        signal.removeEventListener('abort', onAbort);
       }
-
-      xhr.onload = () => {
-        if (isAborted) return;
-        if (xhr.status >= 200 && xhr.status < 300) {
-          try {
-            const data = JSON.parse(xhr.responseText);
-            onProgress({
-              percent: 100,
-              stage: 'IFC cargado en el servidor.',
-              phase: 'uploaded',
-              loadedBytes: file.size,
-              totalBytes: file.size,
-            });
-            resolve(data);
-          } catch {
-            reject(new Error('No se pudo procesar la respuesta del servidor.'));
-          }
-        } else {
-          let errorMsg = 'No se pudo cargar el archivo.';
-          try {
-            const errJson = JSON.parse(xhr.responseText);
-            if (errJson.error) errorMsg = errJson.error;
-            else if (errJson.message) errorMsg = errJson.message;
-          } catch {}
-          reject(new Error(errorMsg));
-        }
-      };
-
-      xhr.onerror = () => {
-        if (isAborted) return;
-        reject(new Error('No se pudo cargar el archivo. Comprueba la conexión.'));
-      };
-
-      xhr.onabort = () => {
-        reject(new DOMException('Carga cancelada por el usuario', 'AbortError'));
-      };
-
-      xhr.send(formData);
-    });
-  } finally {
-    activeXhr = null;
+    }
   }
 
-  if (isAborted || signal?.aborted) {
+  if (signal?.aborted) {
     throw new DOMException('Carga cancelada por el usuario', 'AbortError');
   }
 
   const { jobId, progressUrl } = uploadResponseData;
-  jobIdCreated = jobId;
 
-  // 2. Connect to Server-Sent Events (SSE) for server-side processing
+  // 2. Connect to Server-Sent Events (SSE) with Polling Fallback for conversion progress
   return new Promise<BackendConversionResult>((resolve, reject) => {
-    if (isAborted || signal?.aborted) {
-      onAbort();
-      return reject(new DOMException('Carga cancelada por el usuario', 'AbortError'));
-    }
+    let activeEventSource: EventSource | null = null;
+    let pollingIntervalId: any = null;
+    let isFinished = false;
 
-    const eventSource = new EventSource(progressUrl);
-    activeEventSource = eventSource;
+    const cleanup = () => {
+      isFinished = true;
+      if (activeEventSource) {
+        try { activeEventSource.close(); } catch {}
+        activeEventSource = null;
+      }
+      if (pollingIntervalId) {
+        clearInterval(pollingIntervalId);
+        pollingIntervalId = null;
+      }
+    };
+
+    const onAbort = () => {
+      cleanup();
+      reject(new DOMException('Carga cancelada por el usuario', 'AbortError'));
+    };
+
+    if (signal) {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
 
     onProgress({
       percent: 0,
@@ -254,28 +518,11 @@ export async function convertIfcViaBackend(
       phase: 'processing',
     });
 
-    eventSource.addEventListener('progress', (e: MessageEvent) => {
-      if (isAborted) return;
-      try {
-        const data = JSON.parse(e.data);
-        onProgress({
-          percent: typeof data.percent === 'number' ? data.percent : 0,
-          stage: data.stage || 'Convirtiendo IFC → FRAG...',
-          elapsed: data.elapsed,
-          phase: 'processing',
-        });
-      } catch (err) {
-        console.error('Error parseando evento SSE de progreso:', err);
-      }
-    });
-
-    eventSource.addEventListener('complete', async (e: MessageEvent) => {
-      if (isAborted) return;
-      eventSource.close();
-      activeEventSource = null;
+    const handleComplete = async (data: any) => {
+      if (isFinished) return;
+      cleanup();
 
       try {
-        const data = JSON.parse(e.data);
         const { parts, downloadUrls, totalSizeMB, durationSec } = data;
 
         onProgress({
@@ -284,9 +531,10 @@ export async function convertIfcViaBackend(
           phase: 'processing',
         });
 
+        // Download fragments sequentially without memory bloat
         const fragmentBuffers: Uint8Array[] = [];
         for (let i = 0; i < downloadUrls.length; i++) {
-          if (isAborted) break;
+          if (signal?.aborted) break;
           const downloadUrl = downloadUrls[i];
           const partName = parts[i] || `Parte ${i + 1}`;
           onProgress({
@@ -311,11 +559,6 @@ export async function convertIfcViaBackend(
           fragmentBuffers.push(new Uint8Array(buf));
         }
 
-        // Cleanup temporary files on backend
-        try {
-          await fetch(`/api/jobs/${jobId}`, { method: 'DELETE', credentials: 'include' });
-        } catch {}
-
         onProgress({
           percent: 100,
           stage: 'Proyecto listo.',
@@ -326,8 +569,8 @@ export async function convertIfcViaBackend(
           parts,
           fragmentBuffers,
           jobId,
-          durationSec,
-          totalSizeMB,
+          durationSec: String(durationSec || '0'),
+          totalSizeMB: String(totalSizeMB || '0'),
         });
       } catch (err) {
         reject(err);
@@ -336,27 +579,90 @@ export async function convertIfcViaBackend(
           signal.removeEventListener('abort', onAbort);
         }
       }
-    });
-
-    eventSource.addEventListener('error', (e: any) => {
-      if (isAborted) return;
-      eventSource.close();
-      activeEventSource = null;
-      let errorMsg = 'No se pudo completar el procesamiento del modelo IFC.';
-      if (e?.data) {
-        try {
-          const parsed = JSON.parse(e.data);
-          if (parsed.error) errorMsg = parsed.error;
-        } catch {}
-      }
-      reject(new Error(errorMsg));
-    });
-
-    eventSource.onerror = () => {
-      if (eventSource.readyState === EventSource.CLOSED) {
-        // Closed normally or aborted
-      }
     };
+
+    // Polling fallback function
+    const startPollingFallback = () => {
+      if (pollingIntervalId || isFinished) return;
+      pollingIntervalId = setInterval(async () => {
+        if (isFinished) return;
+        try {
+          const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/status`, {
+            credentials: 'include',
+            signal,
+          });
+          if (!res.ok) return;
+          const statusData = await res.json();
+
+          if (statusData.status === 'completed') {
+            const parts = statusData.parts || [];
+            const downloadUrls = parts.map((p: string) => `/api/jobs/${encodeURIComponent(jobId)}/download/${encodeURIComponent(p)}`);
+            await handleComplete({
+              parts,
+              downloadUrls,
+              totalSizeMB: (statusData.totalSizeBytes / (1024 * 1024)).toFixed(2),
+              durationSec: 'N/A',
+            });
+          } else if (statusData.status === 'failed') {
+            cleanup();
+            reject(new Error(statusData.error || 'Fallo durante la conversión del modelo IFC.'));
+          } else {
+            onProgress({
+              percent: typeof statusData.progress === 'number' ? statusData.progress : 0,
+              stage: statusData.stage || 'Convirtiendo IFC → FRAG...',
+              phase: 'processing',
+            });
+          }
+        } catch {}
+      }, 1500);
+    };
+
+    try {
+      const eventSource = new EventSource(progressUrl);
+      activeEventSource = eventSource;
+
+      eventSource.addEventListener('progress', (e: MessageEvent) => {
+        if (isFinished) return;
+        try {
+          const data = JSON.parse(e.data);
+          onProgress({
+            percent: typeof data.percent === 'number' ? data.percent : 0,
+            stage: data.stage || 'Convirtiendo IFC → FRAG...',
+            elapsed: data.elapsed,
+            phase: 'processing',
+          });
+        } catch (err) {
+          console.error('Error parseando evento SSE de progreso:', err);
+        }
+      });
+
+      eventSource.addEventListener('complete', async (e: MessageEvent) => {
+        if (isFinished) return;
+        try {
+          const data = JSON.parse(e.data);
+          await handleComplete(data);
+        } catch (err) {
+          reject(err);
+        }
+      });
+
+      eventSource.addEventListener('error', (e: any) => {
+        if (isFinished) return;
+        // If SSE fails or disconnects, gracefully fallback to polling the database status
+        eventSource.close();
+        activeEventSource = null;
+        startPollingFallback();
+      });
+
+      eventSource.onerror = () => {
+        if (isFinished) return;
+        if (eventSource.readyState === EventSource.CLOSED) {
+          startPollingFallback();
+        }
+      };
+    } catch {
+      startPollingFallback();
+    }
   });
 }
 
