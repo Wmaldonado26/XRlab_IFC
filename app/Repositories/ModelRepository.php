@@ -56,6 +56,21 @@ class ModelRepository
     }
 
     /**
+     * Find a model strictly within a specific project by canonical UUID or file name.
+     */
+    public function findInProject(string $projectId, string $identifier): ?BimModel
+    {
+        return BimModel::query()
+            ->with('project')
+            ->where('project_id', $projectId)
+            ->where(function ($q) use ($identifier) {
+                $q->where('id', $identifier)
+                  ->orWhere('name', $identifier);
+            })
+            ->first();
+    }
+
+    /**
      * Create a new model record.
      */
     public function create(array $data): BimModel

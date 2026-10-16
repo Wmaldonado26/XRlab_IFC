@@ -112,64 +112,18 @@
         @dragover.prevent
         @drop.prevent="handleDrop"
     >
-        <!-- Barra superior derecha con Estado de Usuario y Microservicio -->
-        <div class="top-status-bar">
-            <!-- Botón para volver a la Galería Principal de Proyectos -->
-            <button
-                type="button"
-                class="auth-action-btn gallery-nav-btn"
-                title="Volver a la Galería Principal de Proyectos"
-                @click="$emit('return-gallery')"
-            >
-                📁 Galería
-            </button>
-
-            <!-- Pill de Autenticación y Rol -->
-            <div class="user-auth-pill">
-                <template v-if="currentUser">
-                    <div class="user-badge" :title="`Sesión activa: ${currentUser.email}`">
-                        <span class="user-role-dot" :class="currentUser.role"></span>
-                        <span class="user-name-text">{{ currentUser.name }}</span>
-                        <span class="user-role-tag" :class="currentUser.role">{{ currentUser.role === 'admin' ? 'Admin' : 'Usuario' }}</span>
-                    </div>
-                    <button
-                        v-if="isAdmin"
-                        type="button"
-                        class="auth-action-btn admin-btn"
-                        title="Abrir Panel de Administración"
-                        @click="isAdminModalOpen = true"
-                    >
-                        🛡️ Admin
-                    </button>
-                    <button
-                        type="button"
-                        class="auth-action-btn logout-btn"
-                        title="Cerrar sesión"
-                        @click="handleLogout"
-                    >
-                        Salir
-                    </button>
-                </template>
-                <template v-else>
-                    <button
-                        type="button"
-                        class="auth-action-btn login-btn"
-                        title="Iniciar sesión en IFC-XRlab"
-                        @click="isLoginModalOpen = true"
-                    >
-                        🔐 Iniciar Sesión
-                    </button>
-                </template>
-            </div>
-
-            <!-- Pill de estado del microservicio 64-bit -->
-            <div
-                class="backend-status-pill"
-                :class="{ 'is-online': backendStatus.online }"
-                :title="backendStatus.online ? `Microservicio 64-bit conectado (RAM libre: ${backendStatus.freeMemoryGB} GB)` : 'Microservicio desconectado (ejecuta npm run dev:all o npm run server)'"
-            >
-                <span class="status-dot"></span>
-                <span class="status-text">{{ backendStatus.online ? 'Backend 64-bit Activo' : 'Backend Offline' }}</span>
+        <!-- Barra superior flotante (.vtop) -->
+        <div v-if="isAdmin" class="vtop">
+            <div class="vtop-right-group">
+                <!-- Pill de estado del microservicio 64-bit (Solo Administrador) -->
+                <div
+                    class="backend-status-pill"
+                    :class="{ 'is-online': backendStatus.online }"
+                    :title="backendStatus.online ? `Microservicio 64-bit conectado (RAM libre: ${backendStatus.freeMemoryGB} GB)` : 'Microservicio desconectado'"
+                >
+                    <span class="status-dot"></span>
+                    <span class="status-text">{{ backendStatus.online ? 'Backend 64-bit' : 'Offline' }}</span>
+                </div>
             </div>
         </div>
 
@@ -177,7 +131,7 @@
         <input
             ref="ifcLoadInput"
             type="file"
-            accept=".ifc"
+            accept=".ifc,.frag"
             multiple
             style="display: none"
             @change="onIfcLoadSelected"
@@ -185,7 +139,7 @@
         <input
             ref="ifcConvertInput"
             type="file"
-            accept=".ifc"
+            accept=".ifc,.frag"
             multiple
             style="display: none"
             @change="onIfcConvertSelected"
@@ -193,7 +147,7 @@
         <input
             ref="fragInput"
             type="file"
-            accept=".frag"
+            accept=".frag,.ifc"
             multiple
             style="display: none"
             @change="onFragFileSelected"
@@ -213,11 +167,11 @@
             @close="isSectionActive = false"
         />
 
-        <!-- Botón Plegable Flotante para el Menú Lateral (class parent) -->
+        <!-- Botón Plegable Flotante para el Menú Lateral (Menú BIM a la izquierda) -->
         <button
             class="panel-toggle-tab"
             :class="{ 'is-collapsed': isPanelCollapsed }"
-            :title="isPanelCollapsed ? 'Mostrar menú lateral (Árbol y Propiedades) [P]' : 'Ocultar menú lateral [P]'"
+            :title="isPanelCollapsed ? 'Mostrar menú BIM (Árbol y Propiedades) [P]' : 'Ocultar menú BIM [P]'"
             type="button"
             @click="togglePanel"
         >
@@ -273,6 +227,8 @@ import {
     checkBackendHealth,
     convertIfcViaBackend,
     downloadBackendFragments,
+    downloadBackendFragmentsProgressive,
+    downloadBackendFragmentPart,
     downloadModelFragment,
     uploadDirectFrag,
     type BackendHealth,
@@ -289,10 +245,10 @@ import AdminPanelModal from "./AdminPanelModal.vue";
 import {
     currentUser,
     isAdmin,
-    checkSession,
     logout,
 } from "../services/auth-service";
 import { appLogger } from "../services/logger";
+import { viewerDiagnostics } from "../services/viewer-diagnostics";
 
 const props = defineProps<{
     initialProject?: BackendProject | null;
@@ -344,6 +300,7 @@ const handleKeyDown = (e: KeyboardEvent) => {
     if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
         return;
     }
+    if (!e.key) return;
     const key = e.key.toLowerCase();
     if (key === 'p') {
         togglePanel();
@@ -356,6 +313,7 @@ const handleKeyDown = (e: KeyboardEvent) => {
 };
 
 const handleKeyUp = (e: KeyboardEvent) => {
+    if (!e.key) return;
     const key = e.key.toLowerCase();
     activeKeys.delete(key);
     if (activeKeys.size === 0) {
@@ -373,8 +331,10 @@ const startWasdLoop = () => {
 
     const loop = () => {
         const now = performance.now();
-        const delta = Math.min((now - lastWasdTime) / 1000, 0.1);
+        const deltaMs = now - lastWasdTime;
+        const delta = Math.min(deltaMs / 1000, 0.1);
         lastWasdTime = now;
+        viewerDiagnostics.onRenderFrame(deltaMs);
 
         if (activeKeys.size > 0 && world?.camera?.controls) {
             const controls = world.camera.controls as any;
@@ -517,6 +477,7 @@ const checkBackendAndRetry = async () => {
     }
 };
 
+let components: OBC.Components | null = null;
 let panel: any;
 let world: any;
 let fragmentManager: OBC.FragmentsManager;
@@ -529,19 +490,65 @@ let updateSpatialTree: ((state?: any) => void) | null = null;
 let updateModelsList: ((state?: any) => void) | null = null;
 
 const activeProjectId = ref<string | null>(null);
+const activeProjectName = ref<string>('');
 let activeLoadGeneration = 0;
+let currentLoadAbortController: AbortController | null = null;
 let isViewerReady = false;
+
+let healthInterval: any = null;
+
+// --- Detección y perfil de hardware móvil / tablet para optimización de memoria RAM ---
+const isMobileOrTabletDevice = (): boolean => {
+    if (typeof window === 'undefined' || !window.navigator) return false;
+    const ua = navigator.userAgent || '';
+    const isTouch = Boolean(navigator.maxTouchPoints && navigator.maxTouchPoints > 0);
+    const isMobileUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Tablet|Silk/i.test(ua);
+    const isIPadOS = (/Macintosh/i.test(ua) || /iPad/i.test(ua)) && isTouch;
+    const isAndroidTablet = /Android/i.test(ua) && !/Mobile/i.test(ua);
+    return isMobileUA || isIPadOS || isAndroidTablet;
+};
+
+// Optimización crítica de GPU: limita resolución efectiva para evitar que That Open Engine
+// o pantallas Retina de tablets creen framebuffers de 5400x4000 que provoquen el cierre por OOM.
+const enforceSafePixelRatio = () => {
+    if (!world?.renderer?.three) return;
+    const isMobile = isMobileOrTabletDevice();
+    const maxRatio = isMobile ? 1.0 : 1.5;
+    const safeRatio = Math.min(window.devicePixelRatio || 1, maxRatio);
+    world.renderer.three.setPixelRatio(safeRatio);
+};
+
+let fitCameraDebounceTimer: any = null;
+const debouncedFitCamera = (delay = 250) => {
+    if (fitCameraDebounceTimer) clearTimeout(fitCameraDebounceTimer);
+    fitCameraDebounceTimer = setTimeout(async () => {
+        await fitCameraToModels();
+    }, delay);
+};
+
+const refreshSpatialTreeSafely = (models: any[]) => {
+    if (!updateSpatialTree) return;
+    if (isMobileOrTabletDevice()) {
+        console.log('[Viewer] Árbol espacial omitido automáticamente en tablet/móvil para evitar el cierre por falta de memoria RAM.');
+        return;
+    }
+    try {
+        updateSpatialTree({ models });
+    } catch (err) {
+        console.warn('[Viewer] Error al actualizar árbol espacial:', err);
+    }
+};
 
 onMounted(async () => {
     if (!containerRef.value) return;
 
-    // Verificar sesión activa
-    await checkSession();
-
     // Verificar disponibilidad del microservicio local y sondear periódicamente
     backendStatus.value = await checkBackendHealth();
-    setInterval(async () => {
+    viewerDiagnostics.setBackendFreeMemory(backendStatus.value.freeMemoryGB || 0);
+    if (healthInterval) clearInterval(healthInterval);
+    healthInterval = setInterval(async () => {
         backendStatus.value = await checkBackendHealth();
+        viewerDiagnostics.setBackendFreeMemory(backendStatus.value.freeMemoryGB || 0);
     }, 8000);
 
     // Inicializar contador de errores y suscribirse a nuevos eventos
@@ -550,7 +557,7 @@ onMounted(async () => {
 
     BUI.Manager.init();
 
-    const components = new OBC.Components();
+    components = new OBC.Components();
     const worlds = components.get(OBC.Worlds);
     world = worlds.create<
         OBC.SimpleScene,
@@ -566,6 +573,32 @@ onMounted(async () => {
     world.camera = new OBC.OrthoPerspectiveCamera(components);
 
     components.init();
+
+    // Optimización crítica de GPU para tablets: limitar pixelRatio e interceptar resize
+    if (world?.renderer?.three) {
+        enforceSafePixelRatio();
+        viewerDiagnostics.registerRenderer(world.renderer);
+
+        // Envolver resize de That Open Engine para garantizar que no vuelva a forzar pixelRatio = 2 en cada redibujado
+        const originalResize = world.renderer.resize.bind(world.renderer);
+        world.renderer.resize = (size?: any) => {
+            originalResize(size);
+            enforceSafePixelRatio();
+        };
+
+        const canvas = world.renderer.three.domElement;
+        if (canvas) {
+            canvas.addEventListener('webglcontextlost', (event: Event) => {
+                event.preventDefault();
+                console.error('[WebGL] Contexto WebGL perdido por límite de GPU/memoria.');
+                appLogger.error('El navegador perdió el contexto WebGL por falta de memoria RAM/GPU.');
+                loadingMessage.value = 'Contexto WebGL perdido';
+                loadingStage.value = 'El dispositivo agotó la memoria gráfica. Cierra otras aplicaciones y pestañas.';
+                alert('El navegador se quedó sin memoria gráfica (WebGL Context Lost). En tablets o dispositivos con memoria limitada, se recomienda cerrar otras pestañas o dividir el modelo.');
+            }, false);
+        }
+    }
+
     world.camera.controls.maxDistance = 10000000;
     world.camera.controls.minDistance = 0.01;
     world.camera.controls.setLookAt(-60, 30, -20, 0, 0, -20);
@@ -577,25 +610,46 @@ onMounted(async () => {
     fragmentManager = components.get(OBC.FragmentsManager);
     fragmentManager.init("/worker.mjs");
 
-    world.camera.controls.addEventListener("rest", () =>
-        fragmentManager.core.update(true)
-    );
+    // Optimización de culling: limitar consultas masivas a 300ms y desactivar autoCoordinate innecesario
+    if (fragmentManager.core?.settings) {
+        fragmentManager.core.settings.maxUpdateRate = 300;
+        fragmentManager.core.settings.autoCoordinate = false;
+    }
 
-    // Al cargar cualquier modelo fragmentado, vincular a la escena y enfocar la cámara
+    world.camera.controls.addEventListener("rest", async () => {
+        try {
+            const models = Array.from(fragmentManager?.list?.values() || []);
+            const anyBusy = models.some((m: any) => m.isBusy);
+            if (!anyBusy) {
+                await fragmentManager.core.update(false);
+            }
+        } catch {}
+    });
+
+    // Al cargar cualquier modelo fragmentado, vincular cámara, clipping y calidad gráfica adaptativa
     fragmentManager.list.onItemSet.add(async ({ value: model }) => {
-        model.useCamera(world.camera.three);
-        world.scene.three.add(model.object);
-        await fragmentManager.core.update(true);
+        try {
+            if (world?.camera?.three) {
+                model.useCamera(world.camera.three);
+            }
+            // Enlace de planos de corte al culling del worker
+            model.getClippingPlanesEvent = () => (world?.renderer?.three?.clippingPlanes || []);
 
-        setTimeout(async () => {
-            await fitCameraToModels(model);
-        }, 150);
+            // Calidad gráfica adaptativa: 0.75 en tablet para reducir consumo de vértices/LOD, 1.0 en PC
+            if (isMobileOrTabletDevice()) {
+                model.graphicsQuality = 0.75;
+            }
+        } catch {}
+        if (model.object && world?.scene?.three && !world.scene.three.children.includes(model.object)) {
+            world.scene.three.add(model.object);
+        }
+        debouncedFitCamera(250);
     });
 
     const [modelsListEl, updateModelsFn] = BUIC.tables.modelsList({
         components,
         metaDataTags: ["schema"],
-        actions: { download: true },
+        actions: { download: isAdmin.value ? true : false },
     });
     updateModelsList = updateModelsFn;
 
@@ -625,10 +679,8 @@ onMounted(async () => {
     propertiesTableEl.preserveStructureOnFilter = true;
     propertiesTableEl.indentationInText = false;
 
-    // Panel UI
+    // Panel UI Adaptativo según rol y dispositivo (Admin vs Usuario Normal / Tablet)
     panel = BUI.Component.create(() => {
-        const [loadFragBtn] = BUIC.buttons.loadFrag({ components, world });
-
         const onSearchSpatialTree = (e: Event) => {
             const input = e.target as BUI.TextInput;
             spatialTreeEl.queryString = input.value;
@@ -639,18 +691,46 @@ onMounted(async () => {
             propertiesTableEl.queryString = input.value !== "" ? input.value : null;
         };
 
+        const onManualGenerateTree = () => {
+            if (updateSpatialTree && fragmentManager) {
+                updateSpatialTree({ models: Array.from(fragmentManager.list.values()) });
+            }
+        };
+
+        const isMobile = isMobileOrTabletDevice();
+
         return BUI.html`
-            <bim-panel label="IFC / FRAG Engine">
+            <bim-panel label="${isAdmin.value ? 'IFC / FRAG Engine' : 'Visor BIM'}">
+                ${isAdmin.value ? BUI.html`
                 <bim-panel-section label="Gestión de Archivos">
                     <bim-button label="Cargar Archivo(s) IFC" icon="material-symbols:file-open" @click=${openIfcLoadDialog}></bim-button>
                     <bim-button label="Cargar Archivo(s) .FRAG" icon="mage:box-3d-fill" @click=${openFragDialog}></bim-button>
                     <bim-button label="Convertir IFC a .FRAG" icon="material-symbols:transform" @click=${openIfcConvertDialog}></bim-button>
                     <bim-button label="Guardar .FRAG Actual" icon="flowbite:download-solid" @click=${downloadCurrentFrag}></bim-button>
-                    <bim-button label="Enfocar Barco (Zoom Todo)" icon="material-symbols:fit-screen" @click=${() => fitCameraToModels()}></bim-button>
+                    <bim-button label="Enfocar Todo (Zoom Todo)" icon="material-symbols:fit-screen" @click=${() => fitCameraToModels()}></bim-button>
                     <bim-button label="Ver Consola / Logs de Errores" icon="material-symbols:terminal" @click=${openLogModal}></bim-button>
+                    ${isMobile ? BUI.html`
+                    <div style="padding: 6px 10px; margin: 4px 0; background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.25); border-radius: 6px; font-size: 11px; color: #93c5fd;">
+                        ⚡ <strong>Modo Tablet:</strong> Árbol jerárquico en pausa para proteger memoria.
+                    </div>
+                    <bim-button label="Cargar Árbol Manualmente" icon="material-symbols:account-tree" @click=${onManualGenerateTree}></bim-button>
+                    ` : ''}
                     <bim-text-input @input=${onSearchSpatialTree} placeholder="Buscar en Árbol..." debounce="200"></bim-text-input>
                     ${spatialTreeEl}
                 </bim-panel-section>
+                ` : BUI.html`
+                <bim-panel-section label="Navegación del Modelo">
+                    <bim-button label="Enfocar Todo (Zoom Todo)" icon="material-symbols:fit-screen" @click=${() => fitCameraToModels()}></bim-button>
+                    ${isMobile ? BUI.html`
+                    <div style="padding: 6px 10px; margin: 4px 0; background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.25); border-radius: 6px; font-size: 11px; color: #93c5fd;">
+                        ⚡ <strong>Modo Tablet:</strong> Árbol jerárquico en pausa para proteger memoria.
+                    </div>
+                    <bim-button label="Cargar Árbol Manualmente" icon="material-symbols:account-tree" @click=${onManualGenerateTree}></bim-button>
+                    ` : ''}
+                    <bim-text-input @input=${onSearchSpatialTree} placeholder="Buscar en Árbol..." debounce="200"></bim-text-input>
+                    ${spatialTreeEl}
+                </bim-panel-section>
+                `}
                 <bim-panel-section icon="mage:box-3d-fill" label="Modelos Cargados">
                     ${modelsListEl}
                 </bim-panel-section>
@@ -721,12 +801,33 @@ const togglePanel = () => {
 };
 
 onUnmounted(() => {
+    if (currentLoadAbortController) {
+        currentLoadAbortController.abort();
+        currentLoadAbortController = null;
+    }
+    if (healthInterval) {
+        clearInterval(healthInterval);
+        healthInterval = null;
+    }
+    if (fitCameraDebounceTimer) {
+        clearTimeout(fitCameraDebounceTimer);
+        fitCameraDebounceTimer = null;
+    }
     window.removeEventListener('keydown', handleKeyDown);
     window.removeEventListener('keyup', handleKeyUp);
     window.removeEventListener('blur', handleWindowBlur);
     if (wasdFrameId !== null) {
         cancelAnimationFrame(wasdFrameId);
     }
+    if (components) {
+        try {
+            components.dispose();
+        } catch (e) {
+            console.warn('[Viewer] Error al disponer components:', e);
+        }
+        components = null;
+    }
+    viewerDiagnostics.dispose();
 });
 
 const fitCameraToModels = async (targetModel?: any) => {
@@ -916,9 +1017,20 @@ const setCameraPreset = (preset: 'top' | 'front' | 'side' | 'iso') => {
 };
 
 const clearScene = async () => {
+    // Cancelar cualquier descarga o inyección activa en curso
+    if (currentLoadAbortController) {
+        currentLoadAbortController.abort();
+        currentLoadAbortController = null;
+    }
+
     // Incrementar generación para invalidar cargas asíncronas pendientes
     activeLoadGeneration++;
     activeProjectId.value = null;
+    activeProjectName.value = '';
+
+    // Liberar referencias a buffers crudos en memoria para permitir recolección de basura
+    lastFragmentBytes = null;
+    lastFragmentBuffers = [];
 
     // 1. Limpiar highlighter y selecciones activas (con timeout de seguridad para evitar bloqueos)
     if (highlighter) {
@@ -953,18 +1065,6 @@ const clearScene = async () => {
             for (const m of models as any[]) {
                 if (m?.object && world?.scene?.three) {
                     world.scene.three.remove(m.object);
-                    m.object.traverse?.((child: any) => {
-                        if (child.geometry) {
-                            child.geometry.dispose?.();
-                        }
-                        if (child.material) {
-                            if (Array.isArray(child.material)) {
-                                child.material.forEach((mat: any) => mat?.dispose?.());
-                            } else {
-                                child.material.dispose?.();
-                            }
-                        }
-                    });
                 }
 
                 if (m?.modelId && typeof fragmentManager.core?.disposeModel === 'function') {
@@ -1036,23 +1136,32 @@ const loadCachedModel = async (id: string) => {
     }
 
     await clearScene();
+    if (currentLoadAbortController) {
+        currentLoadAbortController.abort();
+        currentLoadAbortController = null;
+    }
+    currentLoadAbortController = new AbortController();
+    const signal = currentLoadAbortController.signal;
+
     const currentGen = ++activeLoadGeneration;
     activeProjectId.value = id;
 
     isLoading.value = true;
     loadingProgress.value = 15;
     loadingFileName.value = cached.name;
-    const totalBytes = cached.parts.reduce((a, b) => a + b.byteLength, 0);
+    const totalBytes = cached.parts.reduce((a, b) => a + (b ? b.byteLength : 0), 0);
     loadingFileSize.value = `${(totalBytes / (1024 * 1024)).toFixed(1)} MB (Caché Local)`;
     loadingMessage.value = 'Cargando desde Caché Local IndexedDB...';
     loadingSubtitle.value = 'Carga instantánea sin consumo de red';
     loadingStage.value = 'Inyectando fragmentos en Three.js...';
 
+    viewerDiagnostics.markLoadStart(cached.parts.length, totalBytes);
     try {
         for (let i = 0; i < cached.parts.length; i++) {
-            if (currentGen !== activeLoadGeneration) return;
+            if (currentGen !== activeLoadGeneration || signal.aborted) return;
             const buf = cached.parts[i];
-            const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+            if (!buf) continue;
+            let bytes: Uint8Array | null = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
             const partName = (cached.partNames && cached.partNames[i]) || `${cached.name || id}_part_${i + 1}`;
             const cleanModelId = partName.replace(/\.frag$/i, '');
             let loadedModel: any = null;
@@ -1066,7 +1175,12 @@ const loadCachedModel = async (id: string) => {
                     console.error(`[FRAG-CACHE] Fallo al cargar parte "${cleanModelId}":`, errRaw);
                 }
             }
-            if (loadedModel) {
+
+            // Liberar referencia al buffer de este fragmento para permitir al GC reclamar RAM
+            cached.parts[i] = null as any;
+            bytes = null;
+
+            if (loadedModel && currentGen === activeLoadGeneration && !signal.aborted) {
                 const modelKey = cleanModelId;
                 if (!fragmentManager.list.has(modelKey)) {
                     fragmentManager.list.set(modelKey, loadedModel);
@@ -1081,7 +1195,7 @@ const loadCachedModel = async (id: string) => {
             loadingProgress.value = Math.round(((i + 1) / cached.parts.length) * 90);
         }
 
-        if (currentGen !== activeLoadGeneration) return;
+        if (currentGen !== activeLoadGeneration || signal.aborted) return;
 
         try {
             await fragmentManager.core.update(true);
@@ -1090,23 +1204,25 @@ const loadCachedModel = async (id: string) => {
         if (updateModelsList) {
             updateModelsList();
         }
-        if (updateSpatialTree && fragmentManager) {
-            updateSpatialTree({ models: Array.from(fragmentManager.list.values()) });
-        }
+        refreshSpatialTreeSafely(Array.from(fragmentManager.list.values()));
 
         loadingProgress.value = 100;
         loadingStage.value = 'Encuadrando vista de cámara...';
+        enforceSafePixelRatio();
         nextTick(() => {
             world?.renderer?.resize?.();
+            enforceSafePixelRatio();
             window.dispatchEvent(new Event('resize'));
         });
         setTimeout(async () => {
-            if (currentGen === activeLoadGeneration) {
+            if (currentGen === activeLoadGeneration && !signal.aborted) {
+                world?.renderer?.resize?.();
+                enforceSafePixelRatio();
                 await fitCameraToModels();
             }
         }, 150);
     } catch (err: any) {
-        if (currentGen === activeLoadGeneration) {
+        if (currentGen === activeLoadGeneration && !signal.aborted) {
             console.error('Error cargando desde caché:', err);
             alert(`Error al cargar modelo desde caché: ${err.message}`);
         }
@@ -1114,6 +1230,7 @@ const loadCachedModel = async (id: string) => {
         if (currentGen === activeLoadGeneration) {
             isLoading.value = false;
         }
+        viewerDiagnostics.markLoadEnd();
     }
 };
 
@@ -1145,9 +1262,18 @@ const loadBackendProject = async (proj: BackendProject) => {
     // Limpiar modelos del proyecto anterior antes de cargar el nuevo para garantizar aislamiento estricto
     await clearScene();
 
+    // Iniciar nuevo AbortController para esta sesión de carga
+    if (currentLoadAbortController) {
+        currentLoadAbortController.abort();
+        currentLoadAbortController = null;
+    }
+    currentLoadAbortController = new AbortController();
+    const signal = currentLoadAbortController.signal;
+
     // Establecer nueva generación y registrar projectId activo
     const currentGen = ++activeLoadGeneration;
     activeProjectId.value = proj.id;
+    activeProjectName.value = proj.name || proj.fileName || '';
 
     if (!proj.parts || proj.parts.length === 0) {
         appLogger.warn(`El proyecto "${proj.name || proj.fileName}" no contiene modelos FRAG listos.`);
@@ -1158,66 +1284,33 @@ const loadBackendProject = async (proj: BackendProject) => {
     isBackendProcessing.value = true;
     loadingFileName.value = proj.name || proj.fileName;
     loadingFileSize.value = `${proj.totalPartsSizeMB || '0'} MB`;
-    loadingMessage.value = 'Descargando fragmentos del almacenamiento local...';
-    loadingSubtitle.value = `Descarga directa de ${proj.parts.length} partes`;
+    loadingMessage.value = 'Carga progresiva de fragmentos...';
+    loadingSubtitle.value = `Procesando ${proj.parts.length} partes secuencialmente`;
     loadingProgress.value = 10;
     loadingStage.value = 'Conectando con el backend...';
 
+    let injectedCount = 0;
+    let failedCount = 0;
+
+    const totalEstimatedBytes = (Number(proj.totalPartsSizeMB) || 0) * 1024 * 1024;
+    viewerDiagnostics.markLoadStart(proj.parts.length, totalEstimatedBytes);
     try {
-        let buffers: ArrayBuffer[] = [];
-        let usedCache = false;
+        // Carga progresiva real: descarga fragmento i -> inyecta en GPU -> libera buffer -> descarga fragmento i+1
+        // Evita por completo acumular todos los ArrayBuffers en memoria RAM simultáneamente.
+        await downloadBackendFragmentsProgressive(
+            proj.id,
+            proj.parts,
+            async (buffer: ArrayBuffer, index: number, total: number, partName: string) => {
+                if (currentGen !== activeLoadGeneration || signal.aborted) return;
 
-        const cached = await getProjectFragments(proj.id);
-        const hasValidCache = Boolean(
-            cached &&
-            Array.isArray(cached.parts) &&
-            cached.parts.length >= (proj.parts?.length || 1) &&
-            cached.parts.every((p) => p && p.byteLength > 1024)
-        );
-
-        if (hasValidCache && cached) {
-            appLogger.info(`[Viewer] Cargando fragmentos desde caché local (${cached.parts.length} partes).`);
-            buffers = cached.parts;
-            usedCache = true;
-        } else {
-            buffers = await downloadBackendFragments(proj.id, proj.parts, (loaded, total) => {
-                if (currentGen === activeLoadGeneration) {
-                    loadingProgress.value = Math.round((loaded / total) * 70);
-                    loadingStage.value = `Descargando fragmento ${loaded} de ${total}...`;
-                }
-            });
-
-            // Verificar si la generación cambió durante la descarga asíncrona
-            if (currentGen !== activeLoadGeneration) {
-                appLogger.info(`Carga cancelada: el proyecto activo cambió durante la descarga.`);
-                return;
-            }
-
-            // Guardar automáticamente en IndexedDB para futuras visitas instantáneas
-            if (buffers.length > 0) {
-                saveProjectFragments(proj.id, proj.name || proj.fileName, buffers, proj.parts).catch(console.warn);
-            }
-        }
-
-        const injectFragments = async (buffersToInject: ArrayBuffer[]) => {
-            loadingStage.value = 'Inyectando fragmentos en la escena 3D...';
-            lastFragmentBuffers = [];
-
-            for (let i = 0; i < buffersToInject.length; i++) {
-                if (currentGen !== activeLoadGeneration) return;
-
-                const buf = buffersToInject[i];
-                const partName = (proj.parts && proj.parts[i]) || `${proj.name || 'model'}_part_${i + 1}.frag`;
+                loadingStage.value = `Inyectando en GPU: ${partName} (${index + 1}/${total})...`;
                 const cleanModelId = partName.replace(/\.frag$/i, '');
 
                 if (fragmentManager && fragmentManager.list.has(cleanModelId)) {
-                    continue;
+                    return;
                 }
 
-                const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-                lastFragmentBytes = bytes;
-                lastFragmentBuffers.push(bytes);
-
+                let bytes: Uint8Array | null = new Uint8Array(buffer);
                 let loadedModel: any = null;
                 try {
                     loadedModel = await fragmentManager.core.load(bytes as any, { modelId: cleanModelId, raw: false });
@@ -1226,11 +1319,16 @@ const loadBackendProject = async (proj: BackendProject) => {
                     try {
                         loadedModel = await fragmentManager.core.load(bytes as any, { modelId: cleanModelId, raw: true });
                     } catch (errRaw) {
-                        console.error(`[FRAG] Fallo definitivo al cargar parte "${cleanModelId}":`, errRaw);
+                        failedCount++;
+                        console.error(`[FRAG] Fallo al cargar fragmento "${cleanModelId}":`, errRaw);
+                        appLogger.warn(`Fragmento ${partName} no pudo ser cargado: ${errRaw instanceof Error ? errRaw.message : String(errRaw)}`);
                     }
                 }
 
-                if (loadedModel) {
+                // Liberar referencia binaria inmediatamente para recuperación de RAM
+                bytes = null;
+
+                if (loadedModel && currentGen === activeLoadGeneration && !signal.aborted) {
                     const modelKey = cleanModelId;
                     if (!fragmentManager.list.has(modelKey)) {
                         fragmentManager.list.set(modelKey, loadedModel);
@@ -1241,29 +1339,29 @@ const loadBackendProject = async (proj: BackendProject) => {
                     if (loadedModel.object && world?.scene?.three && !world.scene.three.children.includes(loadedModel.object)) {
                         world.scene.three.add(loadedModel.object);
                     }
-                    console.log(`[FRAG] Modelo ${cleanModelId} inyectado en escena 3D (${i + 1}/${buffersToInject.length})`);
+                    injectedCount++;
+                    console.log(`[FRAG] Modelo ${cleanModelId} inyectado en escena 3D (${index + 1}/${total})`);
+                }
+
+                if (currentGen === activeLoadGeneration && !signal.aborted) {
+                    loadingProgress.value = Math.min(92, Math.round(((index + 1) / total) * 90));
+                    loadingStage.value = `Fragmento ${index + 1} de ${total} cargado`;
+                }
+            },
+            {
+                signal,
+                onProgress: (loaded, total, stage) => {
+                    if (currentGen === activeLoadGeneration && !signal.aborted) {
+                        loadingStage.value = stage;
+                        loadingProgress.value = Math.max(10, Math.round((loaded / total) * 85));
+                    }
                 }
             }
-        };
+        );
 
-        try {
-            await injectFragments(buffers);
-        } catch (injectionErr) {
-            if (usedCache) {
-                console.warn('[Viewer] Inyección desde caché falló, purgando caché e intentando descarga directa:', injectionErr);
-                await deleteCachedProject(proj.id);
-                buffers = await downloadBackendFragments(proj.id, proj.parts);
-                await injectFragments(buffers);
-                if (buffers.length > 0) {
-                    saveProjectFragments(proj.id, proj.name || proj.fileName, buffers, proj.parts).catch(console.warn);
-                }
-            } else {
-                throw injectionErr;
-            }
-        }
-
-        // Verificar si la generación cambió tras inyectar todos los fragmentos
-        if (currentGen !== activeLoadGeneration) {
+        // Verificar si la generación cambió o se canceló durante el proceso progresivo
+        if (currentGen !== activeLoadGeneration || signal.aborted) {
+            appLogger.info('Carga cancelada: el proyecto activo cambió o fue interrumpido.');
             return;
         }
 
@@ -1271,30 +1369,40 @@ const loadBackendProject = async (proj: BackendProject) => {
             await fragmentManager.core.update(true);
         } catch {}
 
-        // Actualizar listas y árboles en la interfaz
+        // Actualizar listas y árboles en la interfaz de forma segura para tablets
         if (updateModelsList) {
             updateModelsList();
         }
-        if (updateSpatialTree && fragmentManager) {
-            updateSpatialTree({ models: Array.from(fragmentManager.list.values()) });
-        }
+        refreshSpatialTreeSafely(Array.from(fragmentManager.list.values()));
 
         loadingProgress.value = 100;
         loadingStage.value = 'Encuadrando vista de cámara...';
 
+        enforceSafePixelRatio();
+
         nextTick(() => {
             world?.renderer?.resize?.();
+            enforceSafePixelRatio();
             window.dispatchEvent(new Event('resize'));
         });
 
         setTimeout(async () => {
-            if (currentGen === activeLoadGeneration) {
+            if (currentGen === activeLoadGeneration && !signal.aborted) {
                 world?.renderer?.resize?.();
+                enforceSafePixelRatio();
                 await fitCameraToModels();
             }
         }, 150);
-        appLogger.info(`Proyecto cargado exitosamente: ${proj.name || proj.fileName}`);
+
+        const summaryMsg = failedCount > 0
+            ? `Proyecto cargado con advertencias: ${injectedCount}/${proj.parts.length} fragmentos (${failedCount} fallaron).`
+            : `Proyecto cargado exitosamente: ${proj.name || proj.fileName} (${injectedCount} fragmentos).`;
+        appLogger.info(summaryMsg);
     } catch (err: any) {
+        if (signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
+            console.log('[Viewer] Carga de proyecto cancelada por el usuario o cambio de proyecto.');
+            return;
+        }
         if (currentGen === activeLoadGeneration) {
             console.error('Error cargando proyecto del backend:', err);
             alert(`Error al descargar proyecto: ${err.message}`);
@@ -1304,6 +1412,7 @@ const loadBackendProject = async (proj: BackendProject) => {
             isLoading.value = false;
             isBackendProcessing.value = false;
         }
+        viewerDiagnostics.markLoadEnd(failedCount === 0);
     }
 };
 
@@ -1311,8 +1420,16 @@ const loadBackendModel = async (model: BackendModelItem) => {
     const cleanModelId = model.name.replace(/\.frag$/i, '');
 
     await clearScene();
+    if (currentLoadAbortController) {
+        currentLoadAbortController.abort();
+        currentLoadAbortController = null;
+    }
+    currentLoadAbortController = new AbortController();
+    const signal = currentLoadAbortController.signal;
+
     const currentGen = ++activeLoadGeneration;
     activeProjectId.value = model.projectId || model.id;
+    activeProjectName.value = model.projectName || model.name || '';
 
     isLoading.value = true;
     isBackendProcessing.value = true;
@@ -1323,14 +1440,15 @@ const loadBackendModel = async (model: BackendModelItem) => {
     loadingProgress.value = 20;
     loadingStage.value = 'Conectando con el almacenamiento local...';
 
+    viewerDiagnostics.markLoadStart(1, model.size || 0);
     try {
-        const buffer = await downloadModelFragment(model.id);
-        if (currentGen !== activeLoadGeneration) return;
+        let buffer: ArrayBuffer | null = await downloadModelFragment(model.id, signal);
+        if (currentGen !== activeLoadGeneration || signal.aborted) return;
 
         loadingProgress.value = 75;
         loadingStage.value = 'Inyectando fragmento en GPU y escena 3D...';
 
-        const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+        let bytes: Uint8Array | null = new Uint8Array(buffer);
         let loadedModel: any = null;
         try {
             loadedModel = await fragmentManager.core.load(bytes as any, { modelId: cleanModelId, raw: false });
@@ -1338,7 +1456,11 @@ const loadBackendModel = async (model: BackendModelItem) => {
             loadedModel = await fragmentManager.core.load(bytes as any, { modelId: cleanModelId, raw: true });
         }
 
-        if (loadedModel) {
+        // Liberar referencias al buffer de descarga inmediatamente
+        buffer = null;
+        bytes = null;
+
+        if (loadedModel && currentGen === activeLoadGeneration && !signal.aborted) {
             const modelKey = cleanModelId || loadedModel.modelId || loadedModel.id;
             if (!fragmentManager.list.has(modelKey)) {
                 fragmentManager.list.set(modelKey, loadedModel);
@@ -1351,24 +1473,28 @@ const loadBackendModel = async (model: BackendModelItem) => {
             }
         }
 
-        if (currentGen !== activeLoadGeneration) return;
+        if (currentGen !== activeLoadGeneration || signal.aborted) return;
 
         if (updateModelsList) {
             updateModelsList();
         }
-        if (updateSpatialTree && fragmentManager) {
-            updateSpatialTree({ models: Array.from(fragmentManager.list.values()) });
-        }
+        refreshSpatialTreeSafely(Array.from(fragmentManager.list.values()));
 
         loadingProgress.value = 100;
         loadingStage.value = 'Encuadrando vista de cámara...';
+        enforceSafePixelRatio();
         setTimeout(async () => {
-            if (currentGen === activeLoadGeneration) {
+            if (currentGen === activeLoadGeneration && !signal.aborted) {
+                world?.renderer?.resize?.();
+                enforceSafePixelRatio();
                 await fitCameraToModels();
             }
         }, 150);
         appLogger.info(`Modelo persistente cargado con éxito: ${model.name}`);
     } catch (err: any) {
+        if (signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
+            return;
+        }
         if (currentGen === activeLoadGeneration) {
             console.error('Error cargando modelo del backend:', err);
             alert(`Error al descargar o inyectar modelo: ${err.message}`);
@@ -1378,6 +1504,7 @@ const loadBackendModel = async (model: BackendModelItem) => {
             isLoading.value = false;
             isBackendProcessing.value = false;
         }
+        viewerDiagnostics.markLoadEnd();
     }
 };
 
@@ -1419,15 +1546,46 @@ const handleLogout = async () => {
     appLogger.info('Sesión cerrada.');
 };
 
+const handleMixedFilesSelected = async (files: File[]) => {
+    const fragFiles = files.filter((f) => f.name.toLowerCase().endsWith('.frag'));
+    const ifcFiles = files.filter((f) => f.name.toLowerCase().endsWith('.ifc'));
+
+    if (fragFiles.length === 0 && ifcFiles.length === 0) {
+        alert('Por favor selecciona uno o varios archivos válidos (.ifc o .frag).');
+        return;
+    }
+
+    if (fragFiles.length > 0) {
+        await loadMultipleFragFiles(fragFiles);
+    }
+
+    if (ifcFiles.length > 0) {
+        if (!currentUser.value) {
+            isLoginModalOpen.value = true;
+            alert('Debe iniciar sesión para procesar archivos IFC.');
+            return;
+        }
+        await processMultipleIfcFiles(ifcFiles, false);
+    }
+};
+
 const onIfcLoadSelected = async (e: Event) => {
+    if (!isAdmin.value) {
+        alert('Acceso restringido: Solo los administradores pueden cargar o procesar archivos de modelos.');
+        return;
+    }
     const input = e.target as HTMLInputElement;
     const files = input.files ? Array.from(input.files) : [];
     if (files.length === 0) return;
-    await processMultipleIfcFiles(files, false);
+    await handleMixedFilesSelected(files);
     input.value = '';
 };
 
 const onIfcConvertSelected = async (e: Event) => {
+    if (!isAdmin.value) {
+        alert('Acceso restringido: Solo los administradores pueden convertir archivos IFC.');
+        return;
+    }
     const input = e.target as HTMLInputElement;
     const files = input.files ? Array.from(input.files) : [];
     if (files.length === 0) return;
@@ -1438,14 +1596,22 @@ const onIfcConvertSelected = async (e: Event) => {
 const onIfcFileSelected = onIfcLoadSelected;
 
 const onFragFileSelected = async (e: Event) => {
+    if (!isAdmin.value) {
+        alert('Acceso restringido: Solo los administradores pueden cargar archivos de modelos.');
+        return;
+    }
     const input = e.target as HTMLInputElement;
     const files = input.files ? Array.from(input.files) : [];
     if (files.length === 0) return;
-    await loadMultipleFragFiles(files);
+    await handleMixedFilesSelected(files);
     input.value = '';
 };
 
 const handleDrop = async (e: DragEvent) => {
+    if (!isAdmin.value) {
+        alert('Acceso restringido: Como usuario normal solo puedes visualizar los modelos asignados a tus proyectos.');
+        return;
+    }
     const fileList = e.dataTransfer?.files;
     if (!fileList || fileList.length === 0) return;
 
@@ -1468,10 +1634,6 @@ const handleDrop = async (e: DragEvent) => {
             alert('Debe iniciar sesión para procesar archivos IFC.');
             return;
         }
-        if (!isAdmin.value) {
-            alert('Acceso restringido: Solo los administradores pueden procesar o convertir archivos IFC.');
-            return;
-        }
         await processMultipleIfcFiles(ifcFiles, false);
     }
 };
@@ -1479,6 +1641,9 @@ const handleDrop = async (e: DragEvent) => {
 const loadMultipleFragFiles = async (files: File[]) => {
     isLoading.value = true;
     loadingProgress.value = 0;
+
+    const isMobile = isMobileOrTabletDevice();
+    const totalSizeMB = files.reduce((acc, f) => acc + f.size, 0) / (1024 * 1024);
 
     try {
         const cachedBuffers: ArrayBuffer[] = [];
@@ -1492,9 +1657,13 @@ const loadMultipleFragFiles = async (files: File[]) => {
             loadingProgress.value = Math.round((i / files.length) * 100);
 
             const buffer = await file.arrayBuffer();
-            cachedBuffers.push(buffer);
+            if (!isMobile && totalSizeMB < 60) {
+                cachedBuffers.push(buffer);
+            }
             const bytes = new Uint8Array(buffer);
-            lastFragmentBytes = bytes;
+            if (!isMobile) {
+                lastFragmentBytes = bytes;
+            }
 
             loadingStage.value = 'Inicializando geometría en GPU...';
             const cleanModelId = file.name.replace(/\.frag$/i, '');
@@ -1508,10 +1677,11 @@ const loadMultipleFragFiles = async (files: File[]) => {
             }
 
             if (loadedModel) {
-                const modelKey = cleanModelId || loadedModel.modelId || loadedModel.id;
-                if (!fragmentManager.list.has(modelKey)) {
-                    fragmentManager.list.set(modelKey, loadedModel);
+                let modelKey = cleanModelId || loadedModel.modelId || loadedModel.id;
+                if (fragmentManager.list.has(modelKey)) {
+                    modelKey = `${modelKey}_${Date.now()}_${i}`;
                 }
+                fragmentManager.list.set(modelKey, loadedModel);
                 if (world?.camera?.three) {
                     try { loadedModel.useCamera(world.camera.three); } catch {}
                 }
@@ -1522,8 +1692,8 @@ const loadMultipleFragFiles = async (files: File[]) => {
             console.log(`[FRAG] Modelo cargado (${i + 1}/${files.length}): ${file.name}`);
         }
 
-        // Auto-guardar en IndexedDB local
-        if (cachedBuffers.length > 0) {
+        // Auto-guardar en IndexedDB local solo si es Desktop y tamaño menor a 60MB (evita clonaciones pesadas en tablets)
+        if (cachedBuffers.length > 0 && !isMobile && totalSizeMB < 60) {
             if (activeProjectId.value) {
                 await appendProjectFragments(activeProjectId.value, loadingFileName.value || 'Proyecto', cachedBuffers);
             } else {
@@ -1531,6 +1701,7 @@ const loadMultipleFragFiles = async (files: File[]) => {
                 await saveProjectFragments(cacheKey, files[0].name, cachedBuffers);
             }
         }
+        cachedBuffers.length = 0;
 
         // Si hay un proyecto activo en el backend, persistir automáticamente en SQLite y almacenamiento
         if (activeProjectId.value) {
@@ -1548,9 +1719,7 @@ const loadMultipleFragFiles = async (files: File[]) => {
         if (updateModelsList) {
             updateModelsList();
         }
-        if (updateSpatialTree && fragmentManager) {
-            updateSpatialTree({ models: Array.from(fragmentManager.list.values()) });
-        }
+        refreshSpatialTreeSafely(Array.from(fragmentManager.list.values()));
 
         loadingProgress.value = 100;
         loadingStage.value = 'Encuadrando vista de cámara...';
@@ -1601,33 +1770,60 @@ const processMultipleIfcFiles = async (files: File[], autoDownloadFrag: boolean 
                             }
                         });
 
-                        lastFragmentBuffers = result.fragmentBuffers;
-                        lastFragmentBytes = result.fragmentBuffers[0] || null;
+                        const isMobileDevice = isMobileOrTabletDevice();
+                        const totalFragMB = parseFloat(result.totalSizeMB || '0');
 
                         for (let partIdx = 0; partIdx < result.fragmentBuffers.length; partIdx++) {
                             const partBuffer = result.fragmentBuffers[partIdx];
+                            if (!partBuffer) continue;
                             const partName = result.parts[partIdx] || `Part${partIdx + 1}.frag`;
                             loadingStage.value = `Inyectando en GPU: ${partName} (${partIdx + 1}/${result.fragmentBuffers.length})...`;
 
                             const cleanModelId = partName.replace(/\.frag$/i, '');
+                            let loadedModel: any = null;
                             try {
-                                await fragmentManager.core.load(partBuffer as any, { modelId: cleanModelId, raw: false });
+                                loadedModel = await fragmentManager.core.load(partBuffer as any, { modelId: cleanModelId, raw: false });
                             } catch {
-                                await fragmentManager.core.load(partBuffer as any, { modelId: cleanModelId, raw: true });
+                                loadedModel = await fragmentManager.core.load(partBuffer as any, { modelId: cleanModelId, raw: true });
+                            }
+
+                            if (loadedModel) {
+                                let modelKey = cleanModelId || loadedModel.modelId || loadedModel.id;
+                                if (fragmentManager.list.has(modelKey)) {
+                                    modelKey = `${modelKey}_${Date.now()}_${partIdx}`;
+                                }
+                                fragmentManager.list.set(modelKey, loadedModel);
+                                if (world?.camera?.three) {
+                                    try { loadedModel.useCamera(world.camera.three); } catch {}
+                                }
+                                if (loadedModel.object && world?.scene?.three && !world.scene.three.children.includes(loadedModel.object)) {
+                                    world.scene.three.add(loadedModel.object);
+                                }
                             }
                             console.log(`[Backend] Modelo fragmentado inyectado en escena 3D: ${partName}`);
 
                             if (autoDownloadFrag) {
                                 downloadFragmentFile(partBuffer, partName);
                             }
+
+                            // Liberar memoria cruda de este fragmento inmediatamente
+                            result.fragmentBuffers[partIdx] = null as any;
                         }
 
-                        // Auto-guardar en IndexedDB local
-                        saveProjectFragments(
-                            result.jobId,
-                            file.name,
-                            result.fragmentBuffers.map((b) => b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer)
-                        ).catch(console.warn);
+                        if (updateModelsList) {
+                            updateModelsList();
+                        }
+                        refreshSpatialTreeSafely(Array.from(fragmentManager.list.values()));
+
+                        // Auto-guardar en IndexedDB local sólo si es de tamaño moderado (<60MB) y escritorio
+                        if (!isMobileDevice && totalFragMB > 0 && totalFragMB < 60) {
+                            try {
+                                const validBuffers = result.fragmentBuffers.filter(Boolean).map((b) => b.buffer);
+                                if (validBuffers.length > 0) {
+                                    saveProjectFragments(result.jobId, file.name, validBuffers).catch(console.warn);
+                                }
+                            } catch {}
+                        }
 
                         loadingProgress.value = 100;
                         loadingStage.value = 'Encuadrando vista de cámara...';
@@ -1705,10 +1901,34 @@ const processMultipleIfcFiles = async (files: File[], autoDownloadFrag: boolean 
                 const partLabel = fragmentArray.length > 1 ? ` (${partIdx + 1}/${fragmentArray.length})` : '';
                 loadingStage.value = `Cargando Fragments en GPU${partLabel}...`;
                 const cleanModelId = fragFileName.replace(/\.frag$/i, '');
-                await fragmentManager.core.load(fragmentBytes, { modelId: cleanModelId, raw: true });
+                let loadedModel: any = null;
+                try {
+                    loadedModel = await fragmentManager.core.load(fragmentBytes, { modelId: cleanModelId, raw: true });
+                } catch {
+                    loadedModel = await fragmentManager.core.load(fragmentBytes, { modelId: cleanModelId, raw: false });
+                }
+
+                if (loadedModel) {
+                    let modelKey = cleanModelId || loadedModel.modelId || loadedModel.id;
+                    if (fragmentManager.list.has(modelKey)) {
+                        modelKey = `${modelKey}_${Date.now()}_${partIdx}`;
+                    }
+                    fragmentManager.list.set(modelKey, loadedModel);
+                    if (world?.camera?.three) {
+                        try { loadedModel.useCamera(world.camera.three); } catch {}
+                    }
+                    if (loadedModel.object && world?.scene?.three && !world.scene.three.children.includes(loadedModel.object)) {
+                        world.scene.three.add(loadedModel.object);
+                    }
+                }
                 console.log(`[IFC] Modelo renderizado en escena: ${fragFileName}`);
             }
         }
+
+        if (updateModelsList) {
+            updateModelsList();
+        }
+        refreshSpatialTreeSafely(Array.from(fragmentManager.list.values()));
 
         loadingProgress.value = 100;
         loadingStage.value = 'Encuadrando vista de cámara...';
@@ -2164,7 +2384,29 @@ const downloadCurrentFrag = async () => {
   box-shadow: 0 0 8px #22c55e !important;
 }
 
-/* Top status bar holding user auth pill and backend status */
+/* Top bar idéntica al prototipo (.vtop) */
+.vtop {
+  position: absolute;
+  top: 18px;
+  left: 20px;
+  right: 20px;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  z-index: 1000;
+  pointer-events: none;
+}
+
+.vtop > * {
+  pointer-events: all;
+}
+
+.vtop-right-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .top-status-bar {
   position: absolute;
   top: 14px;
@@ -2179,13 +2421,13 @@ const downloadCurrentFrag = async () => {
   display: flex;
   align-items: center;
   gap: 8px;
-  background: rgba(15, 23, 42, 0.85);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  padding: 4px 10px;
-  border-radius: 20px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid #e5e9f0;
+  padding: 6px 12px;
+  border-radius: 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
   pointer-events: all;
   user-select: none;
 }
@@ -2214,8 +2456,8 @@ const downloadCurrentFrag = async () => {
 
 .user-name-text {
   font-size: 0.76rem;
-  font-weight: 600;
-  color: #f1f5f9;
+  font-weight: 700;
+  color: #172033;
   max-width: 130px;
   white-space: nowrap;
   overflow: hidden;
@@ -2232,21 +2474,21 @@ const downloadCurrentFrag = async () => {
 }
 
 .user-role-tag.admin {
-  background: rgba(245, 158, 11, 0.2);
-  color: #fbbf24;
-  border: 1px solid rgba(245, 158, 11, 0.3);
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fde68a;
 }
 
 .user-role-tag.user {
-  background: rgba(59, 130, 246, 0.2);
-  color: #93c5fd;
-  border: 1px solid rgba(59, 130, 246, 0.3);
+  background: #eff6ff;
+  color: #1e40af;
+  border: 1px solid #dbeafe;
 }
 
 .auth-action-btn {
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  color: #cbd5e1;
+  background: #ffffff;
+  border: 1px solid #d7dce6;
+  color: #475569;
   padding: 3px 8px;
   border-radius: 6px;
   font-size: 0.72rem;
@@ -2256,6 +2498,36 @@ const downloadCurrentFrag = async () => {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+.auth-action-btn:hover {
+  background: #f1f5f9;
+  color: #172033;
+  border-color: #94a3b8;
+}
+
+.auth-action-btn.logout-btn:hover {
+  background: #fee2e2;
+  color: #b91c1c;
+  border-color: #fca5a5;
+}
+
+.backend-status-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid #e5e9f0;
+  padding: 6px 12px;
+  border-radius: 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #64748b;
+  pointer-events: all;
+  user-select: none;
 }
 
 .auth-action-btn:hover {
@@ -2343,7 +2615,7 @@ const downloadCurrentFrag = async () => {
   animation: hud-blink 1.5s ease-in-out infinite alternate;
 }
 
-/* Botón Plegable Flotante para el Menú Lateral (class parent) */
+/* Botón Plegable Flotante para el Menú Lateral (Menú BIM a la izquierda) */
 .panel-toggle-tab {
   position: absolute;
   top: 18px;

@@ -13,27 +13,27 @@ class AuthService
     /**
      * Maximum failed login attempts allowed per window.
      */
-    private const MAX_ATTEMPTS = 5;
+    private const MAX_ATTEMPTS = 10;
 
     /**
-     * Lockout window in seconds (15 minutes).
+     * Lockout window in seconds (5 minutes).
      */
-    private const WINDOW_SECONDS = 900;
+    private const WINDOW_SECONDS = 300;
 
     public function login(string $email, string $password, string $ip): array
     {
         $cleanEmail = strtolower(trim($email));
 
-        // 1. Check brute force rate limiting
+        // 1. Check brute force rate limiting scoped to email
         $cutoff = now()->subSeconds(self::WINDOW_SECONDS);
         $attemptsCount = DB::table('login_attempts')
-            ->where('ip', $ip)
+            ->where('email', $cleanEmail)
             ->where('attempt_time', '>=', $cutoff)
             ->count();
 
         if ($attemptsCount >= self::MAX_ATTEMPTS) {
             throw ValidationException::withMessages([
-                'email' => ['Demasiados intentos fallidos. Intente nuevamente en 15 minutos.'],
+                'email' => ['Demasiados intentos fallidos. Intente nuevamente en 5 minutos.'],
             ])->status(429);
         }
 

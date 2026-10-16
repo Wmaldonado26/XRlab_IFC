@@ -6,8 +6,8 @@
         <div class="header-left">
           <span class="header-icon">🗂️</span>
           <div>
-            <h3 class="modal-title">Catálogo de Proyectos & Modelos FRAG</h3>
-            <p class="modal-subtitle">Almacenamiento persistente SQLite y caché local sin re-conversión</p>
+            <h3 class="modal-title">{{ isAdmin ? 'Catálogo de Proyectos & Modelos FRAG' : 'Mis Proyectos Asignados' }}</h3>
+            <p class="modal-subtitle">{{ isAdmin ? 'Almacenamiento persistente SQLite y caché local sin re-conversión' : 'Selecciona un proyecto para abrir sus modelos en el visor 3D' }}</p>
           </div>
         </div>
         <button type="button" class="close-btn" title="Cerrar (Esc)" @click="$emit('update:modelValue', false)">✕</button>
@@ -21,7 +21,7 @@
           :class="{ active: activeTab === 'projects' }"
           @click="activeTab = 'projects'"
         >
-          📁 Proyectos SQLite ({{ projectsList.length }})
+          📁 {{ isAdmin ? 'Proyectos SQLite' : 'Mis Proyectos' }} ({{ projectsList.length }})
         </button>
         <button
           type="button"
@@ -32,6 +32,7 @@
           📦 Modelos FRAG ({{ modelsList.length }})
         </button>
         <button
+          v-if="isAdmin"
           type="button"
           class="tab-btn"
           :class="{ active: activeTab === 'cache' }"
@@ -90,9 +91,10 @@
           <div v-else-if="projectsList.length === 0" class="empty-state">
             <span class="empty-icon">📂</span>
             <p v-if="projectSearch">No se encontraron proyectos que coincidan con "{{ projectSearch }}".</p>
+            <p v-else-if="!isAdmin">No tienes proyectos asignados actualmente en el sistema.</p>
             <p v-else>No hay proyectos registrados en SQLite.</p>
-            <span class="empty-hint">Crea un nuevo proyecto o convierte un archivo IFC para comenzar.</span>
-            <button v-if="!projectSearch" type="button" class="primary-btn-sm" style="margin-top: 14px;" @click="openCreateProjectModal">
+            <span class="empty-hint">{{ isAdmin ? 'Crea un nuevo proyecto o convierte un archivo IFC para comenzar.' : 'Solicita a un administrador acceso a tus proyectos asignados.' }}</span>
+            <button v-if="isAdmin && !projectSearch" type="button" class="primary-btn-sm" style="margin-top: 14px;" @click="openCreateProjectModal">
               ➕ Crear Primer Proyecto
             </button>
           </div>

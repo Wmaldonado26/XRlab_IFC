@@ -22,8 +22,12 @@ class ConversionJob extends Model
         'model_id',
         'status',
         'progress',
+        'stage',
         'error_message',
         'parts_json',
+        'original_ifc_name',
+        'original_ifc_path',
+        'total_size_bytes',
     ];
 
     protected function casts(): array
@@ -31,6 +35,7 @@ class ConversionJob extends Model
         return [
             'progress' => 'integer',
             'parts_json' => 'array',
+            'total_size_bytes' => 'integer',
         ];
     }
 

@@ -1,8 +1,9 @@
 <template>
   <div class="viewer-toolbar-wrap">
     <div class="toolbar-dock">
-      <!-- Cargar IFC -->
+      <!-- Cargar IFC (Solo Administrador) -->
       <button
+        v-if="isAdmin"
         type="button"
         class="dock-item"
         title="Cargar modelo IFC"
@@ -12,8 +13,9 @@
         <span class="dock-label">Cargar IFC</span>
       </button>
 
-      <!-- Cargar Frag -->
+      <!-- Cargar Frag (Solo Administrador) -->
       <button
+        v-if="isAdmin"
         type="button"
         class="dock-item"
         title="Cargar archivos de fragmentos (.frag)"
@@ -23,7 +25,7 @@
         <span class="dock-label">Cargar Frag</span>
       </button>
 
-      <div class="dock-divider"></div>
+      <div v-if="isAdmin" class="dock-divider"></div>
 
       <!-- Planos de Sección / Corte 3D -->
       <button
@@ -79,15 +81,15 @@
 
       <div class="dock-divider"></div>
 
-      <!-- Catálogo y Caché -->
+      <!-- Catálogo / Mis Proyectos -->
       <button
         type="button"
         class="dock-item"
-        title="Catálogo de Proyectos y Caché Local"
+        :title="isAdmin ? 'Catálogo de Proyectos y Caché Local' : 'Mis Proyectos Asignados'"
         @click="$emit('openProjects')"
       >
         <span class="dock-icon">🗂️</span>
-        <span class="dock-label">Proyectos</span>
+        <span class="dock-label">{{ isAdmin ? 'Proyectos' : 'Mis Proyectos' }}</span>
       </button>
 
       <!-- Limpiar Escena -->
@@ -105,6 +107,8 @@
 </template>
 
 <script setup lang="ts">
+import { isAdmin } from '../services/auth-service';
+
 defineProps<{
   isSectionActive: boolean;
 }>();
@@ -122,9 +126,9 @@ defineEmits<{
 <style scoped>
 .viewer-toolbar-wrap {
   position: absolute;
-  bottom: 24px;
-  left: 50%;
-  transform: translateX(-50%);
+  top: 50%;
+  right: 18px;
+  transform: translateY(-50%);
   z-index: 1000;
   pointer-events: all;
   user-select: none;
@@ -132,15 +136,29 @@ defineEmits<{
 
 .toolbar-dock {
   display: flex;
+  flex-direction: column;
   align-items: center;
   gap: 6px;
-  background: rgba(15, 23, 42, 0.85);
+  background: rgba(255, 255, 255, 0.96);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(56, 189, 248, 0.25);
-  border-radius: 16px;
-  padding: 6px 12px;
-  box-shadow: 0 12px 35px rgba(0, 0, 0, 0.55);
+  border: 1px solid #e5e9f0;
+  border-radius: 14px;
+  padding: 10px 6px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.28);
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.15) transparent;
+}
+
+.toolbar-dock::-webkit-scrollbar {
+  width: 4px;
+}
+
+.toolbar-dock::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 4px;
 }
 
 .dock-item {
@@ -150,24 +168,26 @@ defineEmits<{
   justify-content: center;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 10px;
-  padding: 6px 10px;
-  color: #94a3b8;
+  border-radius: 9px;
+  padding: 6px 8px;
+  color: #526074;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.15s ease;
   min-width: 52px;
+  width: 100%;
 }
 
 .dock-item:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #f8fafc;
-  transform: translateY(-2px);
+  background: #edf2ff;
+  color: #234BA1;
+  transform: scale(1.04);
 }
 
 .dock-item.active {
-  background: rgba(2, 132, 199, 0.25);
-  border-color: #38bdf8;
-  color: #38bdf8;
+  background: #edf2ff;
+  border-color: #87a2d3;
+  color: #234BA1;
+  font-weight: 700;
 }
 
 .dock-icon {
@@ -177,36 +197,39 @@ defineEmits<{
 
 .dock-label {
   font-size: 0.68rem;
-  font-weight: 600;
+  font-weight: 700;
   margin-top: 3px;
   letter-spacing: 0.02em;
 }
 
 .dock-divider {
-  width: 1px;
-  height: 28px;
-  background: rgba(255, 255, 255, 0.12);
-  margin: 0 4px;
+  width: 32px;
+  height: 1px;
+  background: #e5e9f0;
+  margin: 3px 0;
 }
 
 .views-group {
   display: flex;
+  flex-direction: column;
   align-items: center;
   gap: 3px;
-  background: rgba(30, 41, 59, 0.5);
-  border-radius: 10px;
-  padding: 2px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: #f8faff;
+  border-radius: 9px;
+  padding: 3px;
+  border: 1px solid #e5e9f0;
+  width: 100%;
 }
 
 .view-btn {
-  padding: 5px 8px;
-  min-width: 44px;
+  padding: 5px 6px;
+  min-width: unset;
+  width: 100%;
 }
 
 .clear-btn:hover {
-  background: rgba(239, 68, 68, 0.2);
-  border-color: rgba(239, 68, 68, 0.4);
-  color: #fca5a5;
+  background: #fee2e2;
+  border-color: #fca5a5;
+  color: #dc2626;
 }
 </style>

@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Jobs\ConvertIfcJob;
 use App\Models\BimModel;
 use App\Models\ConversionJob;
 use App\Models\Project;
@@ -14,7 +15,6 @@ use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
-use Symfony\Component\Process\Process;
 
 class ConversionService
 {
@@ -26,14 +26,15 @@ class ConversionService
     }
 
     /**
-     * Accepts IFC upload, creates/validates project, and prepares conversion job.
+     * Accepts single IFC upload, preserves intact original in persistent storage, and creates conversion job.
      */
     public function createJob(UploadedFile $file, ?string $projectId, User $user): array
     {
         $originalName = $file->getClientOriginalName();
-        $baseName = pathinfo($originalName, PATHINFO_FILENAME);
+        $cleanName = basename($originalName);
+        $baseName = pathinfo($cleanName, PATHINFO_FILENAME);
 
-        if (! str_ends_with(strtolower($originalName), '.ifc')) {
+        if (! str_ends_with(strtolower($cleanName), '.ifc')) {
             throw new \InvalidArgumentException('Solo se admiten archivos con formato IFC (.ifc).');
         }
 
@@ -51,9 +52,8 @@ class ConversionService
             // Auto-create project named after the model
             $targetProject = $this->projectRepository->create([
                 'name' => $baseName,
-                'description' => "Proyecto creado automáticamente para {$originalName}",
+                'description' => "Proyecto creado automáticamente para {$cleanName}",
             ]);
-            // If normal user created it, associate them
             if (! $user->isAdmin()) {
                 $user->projects()->attach($targetProject->id, ['assigned_at' => now()->timestamp]);
             }
@@ -61,33 +61,91 @@ class ConversionService
 
         $jobId = (string) Str::uuid();
 
-        // Save incoming IFC to temporary conversion storage
-        $tempDir = storage_path("app/temp/conversions/{$jobId}");
-        if (! file_exists($tempDir)) {
-            mkdir($tempDir, 0755, true);
+        // 1. Store original IFC permanently (intact and separated from temp files)
+        $ifcStorageDir = storage_path("app/ifc/{$targetProject->id}");
+        if (! file_exists($ifcStorageDir)) {
+            mkdir($ifcStorageDir, 0755, true);
         }
 
-        $inputIfcPath = "{$tempDir}/input.ifc";
-        $file->move($tempDir, 'input.ifc');
+        $cleanExt = pathinfo($cleanName, PATHINFO_EXTENSION);
+        $intactIfcPath = "{$ifcStorageDir}/{$baseName}_{$jobId}.{$cleanExt}";
+        $file->move($ifcStorageDir, basename($intactIfcPath));
 
-        // Persist ConversionJob in database
+        $totalBytes = filesize($intactIfcPath);
+
+        // 2. Persist ConversionJob in database
         $job = ConversionJob::create([
             'id' => $jobId,
             'project_id' => $targetProject->id,
             'status' => 'queued',
             'progress' => 0,
+            'stage' => 'En cola de conversión',
+            'original_ifc_name' => $cleanName,
+            'original_ifc_path' => $intactIfcPath,
+            'total_size_bytes' => $totalBytes,
         ]);
+
+        // 3. Dispatch background job
+        ConvertIfcJob::dispatch($job->id, $intactIfcPath, $targetProject->id, $cleanName);
+        $this->ensureBackgroundWorkerRunning();
 
         return [
             'jobId' => $job->id,
             'targetProjectId' => $targetProject->id,
             'progressUrl' => "/api/jobs/{$job->id}/progress",
-            'fileName' => $originalName,
+            'fileName' => $cleanName,
+            'totalBytes' => $totalBytes,
         ];
     }
 
     /**
-     * Executes the Node.js converter script and streams real-time SSE progress events to the browser.
+     * Creates a conversion job from an already assembled intact IFC file (e.g. from chunked upload).
+     */
+    public function createJobFromAssembledIfc(
+        string $intactIfcPath,
+        string $originalFileName,
+        string $projectId,
+        User $user
+    ): array {
+        if (! file_exists($intactIfcPath)) {
+            throw new \InvalidArgumentException("El archivo IFC ensamblado no existe en disco: {$intactIfcPath}");
+        }
+
+        $targetProject = $this->projectRepository->findById($projectId, false);
+        if (! $targetProject) {
+            throw new ModelNotFoundException("Proyecto con ID {$projectId} no encontrado.");
+        }
+
+        $jobId = (string) Str::uuid();
+        $totalBytes = filesize($intactIfcPath);
+
+        $job = ConversionJob::create([
+            'id' => $jobId,
+            'project_id' => $targetProject->id,
+            'status' => 'queued',
+            'progress' => 0,
+            'stage' => 'En cola de conversión',
+            'original_ifc_name' => $originalFileName,
+            'original_ifc_path' => $intactIfcPath,
+            'total_size_bytes' => $totalBytes,
+        ]);
+
+        // Dispatch background job
+        ConvertIfcJob::dispatch($job->id, $intactIfcPath, $targetProject->id, $originalFileName);
+        $this->ensureBackgroundWorkerRunning();
+
+        return [
+            'jobId' => $job->id,
+            'targetProjectId' => $targetProject->id,
+            'progressUrl' => "/api/jobs/{$job->id}/progress",
+            'fileName' => $originalFileName,
+            'totalBytes' => $totalBytes,
+        ];
+    }
+
+    /**
+     * Streams real-time SSE progress events to the browser.
+     * Persistent and decoupled: if browser disconnects, the conversion job continues running in background.
      */
     public function streamProgress(string $jobId, User $user): StreamedResponse
     {
@@ -101,7 +159,7 @@ class ConversionService
             throw new AccessDeniedHttpException('Acceso denegado a este trabajo de conversión.');
         }
 
-        return response()->stream(function () use ($job) {
+        return response()->stream(function () use ($jobId) {
             // Disable output buffering for live SSE streaming
             if (ob_get_level() > 0) {
                 ob_end_flush();
@@ -117,124 +175,76 @@ class ConversionService
             };
 
             $startTime = microtime(true);
-            $sendEvent('progress', [
-                'percent' => 5,
-                'stage' => 'Iniciando subproceso de conversión en Node.js...',
-            ]);
+            $lastProgress = -1;
+            $lastStage = '';
 
-            $tempDir = storage_path("app/temp/conversions/{$job->id}");
-            $inputIfc = "{$tempDir}/input.ifc";
-            $outputFrag = "{$tempDir}/output.frag";
-
-            if (! file_exists($inputIfc)) {
-                $job->update(['status' => 'failed', 'error_message' => 'Archivo IFC de entrada no encontrado en disco.']);
-                $sendEvent('error', ['error' => 'Archivo IFC de entrada no encontrado en disco.']);
-                return;
+            // If job is queued, ensure an independent background worker is processing the queue
+            $job = ConversionJob::find($jobId);
+            if ($job && $job->status === 'queued') {
+                $this->ensureBackgroundWorkerRunning();
             }
 
-            $job->update(['status' => 'processing', 'progress' => 10]);
+            // Loop checking database status and stream updates to client
+            $maxWaitSec = 7200; // 2 hours
+            $startLoop = time();
 
-            $scriptPath = base_path('scripts/convert-ifc.js');
-            $nodePath = 'node';
-
-            $process = new Process([
-                $nodePath,
-                '--max-old-space-size=16384',
-                $scriptPath,
-                $inputIfc,
-                $outputFrag,
-            ]);
-            $process->setTimeout(3600); // Allow up to 1 hour for large files
-
-            $currentPercent = 10;
-            $process->run(function ($type, $buffer) use (&$currentPercent, $sendEvent) {
-                // Parse progress percentages if emitted in stdout
-                if (preg_match('/(\d{1,3})%/', $buffer, $matches)) {
-                    $pct = (int) $matches[1];
-                    if ($pct > $currentPercent && $pct < 95) {
-                        $currentPercent = $pct;
-                        $sendEvent('progress', [
-                            'percent' => $currentPercent,
-                            'stage' => 'Convirtiendo geometría IFC a fragmentos (.frag)...',
-                        ]);
-                    }
+            while (time() - $startLoop < $maxWaitSec) {
+                $job = ConversionJob::find($jobId);
+                if (! $job) {
+                    $sendEvent('error', ['error' => 'Trabajo no encontrado']);
+                    break;
                 }
-            });
 
-            if (! $process->isSuccessful()) {
-                $errorMsg = $process->getErrorOutput() ?: $process->getOutput() ?: 'Fallo en la ejecución del convertidor Node.js';
-                $job->update(['status' => 'failed', 'error_message' => $errorMsg]);
-                $sendEvent('error', ['error' => $errorMsg]);
-                return;
+                if ($job->status === 'failed') {
+                    $sendEvent('error', ['error' => $job->error_message ?: 'Error desconocido durante la conversión']);
+                    break;
+                }
+
+                if ($job->status === 'completed') {
+                    $parts = $job->parts_json ?: [];
+                    $downloadUrls = [];
+                    $totalBytes = 0;
+
+                    foreach ($parts as $partName) {
+                        $model = BimModel::where('project_id', $job->project_id)->where('name', $partName)->first();
+                        if ($model) {
+                            $downloadUrls[] = "/api/models/{$model->id}/download";
+                            $totalBytes += (int) $model->size_bytes;
+                        } else {
+                            $downloadUrls[] = "/api/jobs/{$job->id}/download/{$partName}";
+                        }
+                    }
+
+                    $durationSec = number_format(microtime(true) - $startTime, 2);
+                    $totalSizeMB = number_format($totalBytes / (1024 * 1024), 2);
+
+                    $sendEvent('complete', [
+                        'parts' => $parts,
+                        'downloadUrls' => $downloadUrls,
+                        'totalSizeMB' => $totalSizeMB,
+                        'durationSec' => $durationSec,
+                    ]);
+                    break;
+                }
+
+                if ($job->progress !== $lastProgress || $job->stage !== $lastStage) {
+                    $lastProgress = $job->progress;
+                    $lastStage = $job->stage;
+
+                    $sendEvent('progress', [
+                        'percent' => $job->progress,
+                        'stage' => $job->stage ?: 'Procesando conversión...',
+                        'elapsed' => number_format(microtime(true) - $startTime, 1),
+                    ]);
+                }
+
+                if (connection_aborted()) {
+                    // Browser disconnected. The ConvertIfcJob continues running in the background!
+                    break;
+                }
+
+                usleep(500000); // Poll every 500ms
             }
-
-            // Conversion completed successfully. Collect generated .frag files
-            $fragFiles = glob("{$tempDir}/*.frag");
-            if (empty($fragFiles)) {
-                $fragFiles = file_exists($outputFrag) ? [$outputFrag] : [];
-            }
-
-            if (empty($fragFiles)) {
-                $job->update(['status' => 'failed', 'error_message' => 'El conversor no generó archivos .frag válidos.']);
-                $sendEvent('error', ['error' => 'El conversor no generó archivos .frag válidos.']);
-                return;
-            }
-
-            $sendEvent('progress', [
-                'percent' => 90,
-                'stage' => 'Registrando modelos fragmentados en catálogo y base de datos...',
-            ]);
-
-            $projectId = $job->project_id;
-            $parts = [];
-            $downloadUrls = [];
-            $totalBytes = 0;
-
-            foreach ($fragFiles as $fragAbsPath) {
-                $partName = basename($fragAbsPath);
-                $fileSize = filesize($fragAbsPath);
-                $totalBytes += $fileSize;
-
-                // Move file to project storage
-                $relStoragePath = "{$projectId}/{$partName}";
-                Storage::disk('models')->put($relStoragePath, file_get_contents($fragAbsPath));
-
-                // Register BimModel record in database
-                $model = BimModel::create([
-                    'project_id' => $projectId,
-                    'name' => $partName,
-                    'storage_path' => $relStoragePath,
-                    'size_bytes' => $fileSize,
-                    'status' => 'ready',
-                ]);
-
-                $parts[] = $partName;
-                $downloadUrls[] = "/api/models/{$model->id}/download";
-            }
-
-            // Clean temporary files
-            try {
-                array_map('unlink', glob("{$tempDir}/*.*"));
-                rmdir($tempDir);
-            } catch (\Throwable $e) {
-                // non-fatal cleanup
-            }
-
-            $durationSec = number_format(microtime(true) - $startTime, 2);
-            $totalSizeMB = number_format($totalBytes / (1024 * 1024), 2);
-
-            $job->update([
-                'status' => 'completed',
-                'progress' => 100,
-                'parts_json' => $parts,
-            ]);
-
-            $sendEvent('complete', [
-                'parts' => $parts,
-                'downloadUrls' => $downloadUrls,
-                'totalSizeMB' => $totalSizeMB,
-                'durationSec' => $durationSec,
-            ]);
         }, 200, [
             'Content-Type' => 'text/event-stream',
             'Cache-Control' => 'no-cache',
@@ -290,10 +300,42 @@ class ConversionService
             'projectId' => $job->project_id,
             'status' => $job->status,
             'progress' => $job->progress,
+            'stage' => $job->stage,
             'error' => $job->error_message,
             'parts' => $job->parts_json ?: [],
+            'originalIfcName' => $job->original_ifc_name,
+            'totalSizeBytes' => $job->total_size_bytes,
             'createdAt' => $job->created_at ? $job->created_at->toISOString() : null,
             'updatedAt' => $job->updated_at ? $job->updated_at->toISOString() : null,
         ];
+    }
+
+    /**
+     * Spawns an asynchronous background worker process to consume the queued conversion job
+     * independently from the HTTP request, resilient to browser disconnection.
+     */
+    public function ensureBackgroundWorkerRunning(): void
+    {
+        if (app()->runningUnitTests()) {
+            return;
+        }
+
+        try {
+            $artisan = base_path('artisan');
+            $phpBinary = (new \Symfony\Component\Process\PhpExecutableFinder())->find() ?: 'php';
+
+            $process = new \Symfony\Component\Process\Process([
+                $phpBinary,
+                $artisan,
+                'queue:work',
+                '--once',
+                '--timeout=7200',
+                '--tries=1',
+            ]);
+            $process->setTimeout(null);
+            $process->start(); // Asynchronously spawned in background
+        } catch (\Throwable $e) {
+            // A standing queue daemon may already be handling jobs
+        }
     }
 }

@@ -17,7 +17,7 @@ class DatabaseSeeder extends Seeder
             ['email' => 'admin@ifcxrlab.local'],
             [
                 'name' => 'Administrador Principal',
-                'password' => Hash::make('Admin1234!'),
+                'password' => Hash::make('Admin2026!*'),
                 'role' => 'admin',
                 'is_active' => true,
             ]

@@ -21,8 +21,10 @@ if (originalCreateSettings) {
   };
 }
 
-// Maximum safe file size for single-pass WebAssembly 32-bit linear memory (~1.85 GB)
-const MAX_SAFE_WASM_SIZE = 1.85 * 1024 * 1024 * 1024;
+// Maximum safe file size for single-pass WebAssembly 32-bit linear memory (~1.75 GB)
+const MAX_SAFE_WASM_SIZE = 1.75 * 1024 * 1024 * 1024;
+// Target size per partition for massive files (~1.25 GB raw text)
+const TARGET_PARTITION_SIZE = 1.25 * 1024 * 1024 * 1024;
 
 // 2. Parse command-line arguments
 const rawArgs = process.argv.slice(2);
@@ -47,10 +49,10 @@ if (cleanArgs.length === 0 || cleanArgs.includes('--help') || cleanArgs.includes
    npm run convert -- ./modelo.ifc ./public/models/modelo.frag
 
  High-Scale Architecture:
-   - Single-Pass mode (< 1.85 GB): Zero-copy streaming conversion.
-   - Massive Model mode (> 1.85 GB): Automatic BitSet partitioning
-     into isolated WebAssembly processes, preventing 32-bit WASM
-     heap exhaustion (Aborted error) and outputting valid .frag parts.
+   - Single-Pass mode (<= 1.75 GB): Zero-copy streaming conversion.
+   - Massive Model mode (> 1.75 GB): Dynamic N-way dependency-preserving
+     partitioning into isolated WebAssembly processes, preventing 32-bit WASM
+     heap exhaustion (Aborted OOM) and outputting valid .frag parts.
 ===================================================================
 `);
   process.exit(0);
@@ -78,7 +80,7 @@ const fileSizeMB = (fileSizeBytes / (1024 * 1024)).toFixed(2);
 const fileSizeGB = (fileSizeBytes / (1024 * 1024 * 1024)).toFixed(2);
 
 // ===================================================================
-// SINGLE FILE CONVERSION (Worker Process or Files <= 1.85 GB)
+// SINGLE FILE CONVERSION (Worker Process or Files <= 1.75 GB)
 // ===================================================================
 async function convertSingleIfc(srcPath, dstPath) {
   const partStats = fs.statSync(srcPath);
@@ -188,49 +190,88 @@ function runChildConversion(ifcFile, fragFile) {
   });
 }
 
+// Types considered root structural/context metadata in IFC schemas
+const ROOT_METADATA_TYPES = new Set([
+  'IFCPROJECT',
+  'IFCSITE',
+  'IFCBUILDING',
+  'IFCBUILDINGSTOREY',
+  'IFCSPACE',
+  'IFCGEOMETRICREPRESENTATIONCONTEXT',
+  'IFCGEOMETRICREPRESENTATIONSUBCONTEXT',
+  'IFCUNITASSIGNMENT',
+  'IFCSIUNIT',
+  'IFCCONVERSIONBASEDUNIT',
+  'IFCDIMENSIONALEXPONENTS',
+  'IFCAXIS2PLACEMENT3D',
+  'IFCAXIS2PLACEMENT2D',
+  'IFCDIRECTION',
+  'IFCCARTESIANPOINT',
+  'IFCPERSON',
+  'IFCORGANIZATION',
+  'IFCPERSONANDORGANIZATION',
+  'IFCAPPLICATION',
+  'IFCOWNERHISTORY',
+  'IFCPOSTALADDRESS',
+  'IFCLOCALPLACEMENT',
+  'IFCRELAGGREGATES',
+  'IFCRELCONTAINEDINSPATIALSTRUCTURE',
+]);
+
 // ===================================================================
-// ULTRA-HIGH-SCALE STREAMING BITSET PARTITIONER
+// DYNAMIC N-WAY DEPENDENCY-PRESERVING PARTITIONER
 // ===================================================================
-async function partitionMassiveIfc(sourceIfc, part1Target, part2Target) {
+async function partitionMassiveIfcDynamic(sourceIfc, partitionTargets) {
+  const numParts = partitionTargets.length;
   console.log('\n===================================================================');
-  console.log(' 🧩 AUTOMATIC BITSET PARTITIONING ACTIVATED');
+  console.log(` 🧩 DYNAMIC ${numParts}-WAY IFC PARTITIONING ACTIVATED`);
   console.log('===================================================================');
-  console.log(' 💡 El archivo supera el límite físico de 2 GB de direccionamiento');
-  console.log('    de WebAssembly de 32 bits (wasm32).');
-  console.log('    Dividiendo en sub-modelos balanceados y autónomos (~1.75 GB)...');
+  console.log(' 💡 Archivo masivo que excede el límite lineal de WebAssembly de 32 bits.');
+  console.log(`    Generando ${numParts} sub-modelos independientes y balanceados (< 1.5 GB)...`);
   console.log('===================================================================\n');
 
   const startTime = Date.now();
-  const MAX_ENTITIES = 160000000;
-  const neededBitset = new Uint8Array(Math.ceil(MAX_ENTITIES / 8));
+  const bytesPerPart = Math.ceil(fileSizeBytes / numParts);
 
-  function markNeeded(id) {
-    if (id > 0 && id < MAX_ENTITIES) {
-      neededBitset[id >> 3] |= (1 << (id & 7));
+  const idRegex = /^#(\d+)\s*=\s*([A-Za-z0-9_]+)\s*\(/;
+  const refRegex = /#(\d+)/g;
+
+  // PASS 1: Header scan, boundary entity determination, and dependency mapping
+  console.log('[Pass 1/2] Scanning STEP entities and resolving cross-references...');
+
+  const headerLines = [];
+  let inDataSection = false;
+  let currentBytes = 0;
+  let lastProgress = -1;
+
+  // We track which entities are root context to duplicate in all partitions
+  const rootEntityIds = new Set();
+  // We record partition boundary line/byte ranges
+  const partBoundaries = [];
+  for (let p = 0; p < numParts; p++) {
+    partBoundaries.push({
+      startByte: p * bytesPerPart,
+      endByte: (p + 1) * bytesPerPart,
+    });
+  }
+
+  // Bitset per partition for needed entity IDs
+  const MAX_ENTITY_ID = 200000000;
+  const bitsetByteSize = Math.ceil(MAX_ENTITY_ID / 8);
+  const partBitsets = Array.from({ length: numParts }, () => new Uint8Array(bitsetByteSize));
+
+  function markPartNeeded(partIdx, id) {
+    if (id > 0 && id < MAX_ENTITY_ID) {
+      partBitsets[partIdx][id >> 3] |= (1 << (id & 7));
     }
   }
 
-  function isNeeded(id) {
-    if (id > 0 && id < MAX_ENTITIES) {
-      return (neededBitset[id >> 3] & (1 << (id & 7))) !== 0;
+  function isPartNeeded(partIdx, id) {
+    if (id > 0 && id < MAX_ENTITY_ID) {
+      return (partBitsets[partIdx][id >> 3] & (1 << (id & 7))) !== 0;
     }
     return false;
   }
-
-  const splitByteTarget = Math.floor(fileSizeBytes / 2);
-  const idRegex = /^#(\d+)\s*=/;
-  const refRegex = /#(\d+)/g;
-
-  // PASS 1: Boundary Detection & Cross-Reference Mapping
-  console.log('[Pass 1/2] Scanning cross-references and finding boundary...');
-
-  const headerLines = [];
-  let currentBytes = 0;
-  let inDataSection = false;
-  let splitReached = false;
-  let splitEntityId = -1;
-  let lastProgress = -1;
-  let directRefCount = 0;
 
   const pass1Stream = fs.createReadStream(sourceIfc, {
     encoding: 'utf8',
@@ -265,43 +306,43 @@ async function partitionMassiveIfc(sourceIfc, part1Target, part2Target) {
       break;
     }
 
-    const idMatch = line.match(idRegex);
-    if (!idMatch) continue;
+    const match = line.match(idRegex);
+    if (!match) continue;
 
-    const id = parseInt(idMatch[1], 10);
+    const id = parseInt(match[1], 10);
+    const typeUpper = match[2].toUpperCase();
 
-    if (!splitReached && currentBytes >= splitByteTarget) {
-      splitReached = true;
-      splitEntityId = id;
-      console.log(`\n      📍 Boundary established at Entity #${splitEntityId} (~${(currentBytes / (1024 * 1024 * 1024)).toFixed(2)} GB)`);
+    if (ROOT_METADATA_TYPES.has(typeUpper)) {
+      rootEntityIds.add(id);
     }
 
-    if (splitReached) {
-      refRegex.lastIndex = 0;
-      let match;
-      while ((match = refRegex.exec(line)) !== null) {
-        const refId = parseInt(match[1], 10);
-        if (refId < splitEntityId) {
-          if (!isNeeded(refId)) {
-            markNeeded(refId);
-            directRefCount++;
-          }
-        }
+    // Determine default partition for this entity by byte offset
+    let targetPart = Math.min(numParts - 1, Math.floor(currentBytes / bytesPerPart));
+
+    // Mark entity's referenced IDs as needed by this partition
+    refRegex.lastIndex = 0;
+    let rMatch;
+    while ((rMatch = refRegex.exec(line)) !== null) {
+      const refId = parseInt(rMatch[1], 10);
+      if (refId !== id) {
+        markPartNeeded(targetPart, refId);
       }
     }
   }
 
-  console.log(`\n      🔗 Total Part 1 entities required by Part 2: ${directRefCount.toLocaleString()}`);
+  console.log(`\n      ✓ Found ${rootEntityIds.size} root spatial/context entities (shared across all parts).`);
 
-  // PASS 2: Streaming Generation of Part 1 and Part 2
+  // PASS 2: Streaming Generation of the Partitioned IFC files
   console.log('\n[Pass 2/2] Writing partitioned IFC sub-models to disk...');
 
-  const part1Stream = fs.createWriteStream(part1Target, { encoding: 'utf8' });
-  const part2Stream = fs.createWriteStream(part2Target, { encoding: 'utf8' });
+  const partStreams = partitionTargets.map((target) =>
+    fs.createWriteStream(target, { encoding: 'utf8' })
+  );
 
   const headerContent = headerLines.join('\n') + '\n';
-  part1Stream.write(headerContent);
-  part2Stream.write(headerContent);
+  for (const stream of partStreams) {
+    stream.write(headerContent);
+  }
 
   const pass2Stream = fs.createReadStream(sourceIfc, {
     encoding: 'utf8',
@@ -315,8 +356,6 @@ async function partitionMassiveIfc(sourceIfc, part1Target, part2Target) {
 
   currentBytes = 0;
   inDataSection = false;
-  splitReached = false;
-  let part1Closed = false;
   lastProgress = -1;
 
   for await (const line of rl2) {
@@ -341,68 +380,60 @@ async function partitionMassiveIfc(sourceIfc, part1Target, part2Target) {
       break;
     }
 
-    const idMatch = line.match(idRegex);
-    if (!idMatch) {
-      if (!splitReached) {
-        part1Stream.write(line + '\n');
-      } else {
-        part2Stream.write(line + '\n');
+    const match = line.match(idRegex);
+    if (!match) {
+      // Non-entity line, write to all parts
+      for (const stream of partStreams) {
+        stream.write(line + '\n');
       }
       continue;
     }
 
-    const id = parseInt(idMatch[1], 10);
-    if (id >= splitEntityId) {
-      splitReached = true;
-    }
+    const id = parseInt(match[1], 10);
+    const isRoot = rootEntityIds.has(id);
+    const assignedPart = Math.min(numParts - 1, Math.floor(currentBytes / bytesPerPart));
 
-    if (!splitReached) {
-      part1Stream.write(line + '\n');
-
-      // Shared root spatial & context hierarchy (Project, Site, Building, Units, Contexts)
-      // plus all Part 1 entities explicitly referenced by Part 2
-      if (id <= 1000 || isNeeded(id)) {
-        part2Stream.write(line + '\n');
+    for (let p = 0; p < numParts; p++) {
+      // An entity is written to part P if:
+      // 1. It is a root/context entity, OR
+      // 2. It naturally belongs to part P's byte range, OR
+      // 3. It was explicitly referenced by an entity in part P
+      if (isRoot || p === assignedPart || isPartNeeded(p, id)) {
+        partStreams[p].write(line + '\n');
       }
-    } else {
-      if (!part1Closed) {
-        part1Stream.write('ENDSEC;\nEND-ISO-10303-21;\n');
-        part1Stream.end();
-        part1Closed = true;
-      }
-
-      part2Stream.write(line + '\n');
     }
   }
 
-  part2Stream.write('ENDSEC;\nEND-ISO-10303-21;\n');
-  part2Stream.end();
+  // Close all streams with standard STEP footer
+  for (const stream of partStreams) {
+    stream.write('ENDSEC;\nEND-ISO-10303-21;\n');
+    stream.end();
+  }
 
-  await Promise.all([
-    new Promise((res) => part1Stream.on('finish', res)),
-    new Promise((res) => part2Stream.on('finish', res)),
-  ]);
+  await Promise.all(
+    partStreams.map((s) => new Promise((resolve) => s.on('finish', resolve)))
+  );
 
   const partitionDuration = ((Date.now() - startTime) / 1000).toFixed(1);
-  const part1SizeMB = (fs.statSync(part1Target).size / (1024 * 1024)).toFixed(1);
-  const part2SizeMB = (fs.statSync(part2Target).size / (1024 * 1024)).toFixed(1);
-
   console.log(`\n\n      ✅ Partitioning complete in ${partitionDuration}s:`);
-  console.log(`         - Part 1: ${part1SizeMB} MB`);
-  console.log(`         - Part 2: ${part2SizeMB} MB\n`);
+  for (let p = 0; p < numParts; p++) {
+    const pSizeMB = (fs.statSync(partitionTargets[p]).size / (1024 * 1024)).toFixed(1);
+    console.log(`         - Part ${p + 1}: ${pSizeMB} MB (${path.basename(partitionTargets[p])})`);
+  }
+  console.log('');
 }
 
 // ===================================================================
 // MAIN ENTRY POINT
 // ===================================================================
 async function main() {
-  // If running in single-part mode (e.g. from a child worker) or file fits in WASM:
+  // If running in single-part mode (e.g. child worker) or file fits in WASM:
   if (isSingleMode || fileSizeBytes <= MAX_SAFE_WASM_SIZE) {
     await convertSingleIfc(inputPath, outputPath);
     return;
   }
 
-  // MASSIVE FILE DETECTED (> 1.85 GB)
+  // MASSIVE FILE DETECTED (> 1.75 GB)
   console.log('\n===================================================================');
   console.log(' 🚀 BIM IFC -> FRAG HIGH-CAPACITY CONVERSION PIPELINE');
   console.log('===================================================================');
@@ -414,50 +445,50 @@ async function main() {
   const dirName = path.dirname(outputPath);
   const baseName = path.basename(outputPath, '.frag');
 
-  const part1Ifc = path.join(dirName, `${baseName}_Part1.ifc`);
-  const part2Ifc = path.join(dirName, `${baseName}_Part2.ifc`);
-  const part1Frag = path.join(dirName, `${baseName}_Part1.frag`);
-  const part2Frag = path.join(dirName, `${baseName}_Part2.frag`);
+  // Determine number of partitions dynamically so every partition is comfortably <= 1.3 GB
+  const numParts = Math.max(2, Math.ceil(fileSizeBytes / TARGET_PARTITION_SIZE));
 
-  // Step 1: Partition into valid sub-models under 1.85 GB
-  await partitionMassiveIfc(inputPath, part1Ifc, part2Ifc);
+  const partitionIfcFiles = [];
+  const partitionFragFiles = [];
 
-  // Step 2: Convert Part 1 in an isolated child process
-  console.log('⏳ Starting conversion of Part 1 in an isolated WebAssembly instance...');
-  await runChildConversion(part1Ifc, part1Frag);
-
-  // Step 3: Convert Part 2 in an isolated child process
-  console.log('⏳ Starting conversion of Part 2 in an isolated WebAssembly instance...');
-  await runChildConversion(part2Ifc, part2Frag);
-
-  // Step 4: Cleanup temporary IFC partition files unless requested to keep
-  if (!keepSplits) {
-    console.log('🧹 Cleaning up temporary partitioned IFC files...');
-    if (fs.existsSync(part1Ifc)) fs.unlinkSync(part1Ifc);
-    if (fs.existsSync(part2Ifc)) fs.unlinkSync(part2Ifc);
-    console.log('   Temporary files removed (freed ~3.5 GB of disk space).');
-  } else {
-    console.log('💾 Kept intermediate .ifc files as requested:');
-    console.log(`   - ${part1Ifc}`);
-    console.log(`   - ${part2Ifc}`);
+  for (let i = 1; i <= numParts; i++) {
+    partitionIfcFiles.push(path.join(dirName, `${baseName}_Part${i}.ifc`));
+    partitionFragFiles.push(path.join(dirName, `${baseName}_Part${i}.frag`));
   }
 
-  const p1Size = fs.existsSync(part1Frag) ? (fs.statSync(part1Frag).size / (1024 * 1024)).toFixed(2) : '0';
-  const p2Size = fs.existsSync(part2Frag) ? (fs.statSync(part2Frag).size / (1024 * 1024)).toFixed(2) : '0';
+  // Step 1: Partition into valid sub-models under 1.5 GB
+  await partitionMassiveIfcDynamic(inputPath, partitionIfcFiles);
+
+  // Step 2: Convert each partition in an isolated child process
+  for (let i = 0; i < numParts; i++) {
+    const ifcPart = partitionIfcFiles[i];
+    const fragPart = partitionFragFiles[i];
+    console.log(`⏳ Starting conversion of Part ${i + 1}/${numParts} in an isolated WebAssembly instance...`);
+    await runChildConversion(ifcPart, fragPart);
+  }
+
+  // Step 3: Cleanup temporary IFC partition files unless requested to keep
+  if (!keepSplits) {
+    console.log('🧹 Cleaning up temporary partitioned IFC files...');
+    for (const ifcPart of partitionIfcFiles) {
+      if (fs.existsSync(ifcPart)) {
+        try { fs.unlinkSync(ifcPart); } catch {}
+      }
+    }
+    console.log(`   Temporary files removed (freed disk space).`);
+  } else {
+    console.log('💾 Kept intermediate .ifc files as requested:');
+    partitionIfcFiles.forEach((f) => console.log(`   - ${f}`));
+  }
 
   console.log('\n===================================================================');
   console.log(' 🎉 ALL CONVERSIONS COMPLETED SUCCESSFULLY!');
   console.log('===================================================================');
-  console.log(` 📦 Generated Fragment Part 1 : ${part1Frag} (${p1Size} MB)`);
-  console.log(` 📦 Generated Fragment Part 2 : ${part2Frag} (${p2Size} MB)`);
+  partitionFragFiles.forEach((fragPart, idx) => {
+    const sz = fs.existsSync(fragPart) ? (fs.statSync(fragPart).size / (1024 * 1024)).toFixed(2) : '0';
+    console.log(` 📦 Generated Fragment Part ${idx + 1} : ${fragPart} (${sz} MB)`);
+  });
   console.log('===================================================================');
-  console.log('\n💡 Para visualizar el modelo completo en 3D en tu navegador:');
-  console.log('   1. Abre http://localhost:5173/');
-  console.log('   2. Haz clic en "Cargar FRAG" (o arrastra los archivos al visor)');
-  console.log(`   3. Selecciona simultáneamente:`);
-  console.log(`      - ${path.basename(part1Frag)}`);
-  console.log(`      - ${path.basename(part2Frag)}`);
-  console.log('   4. ¡El visor unificará ambas partes de forma transparente!\n');
 }
 
 main().catch((err) => {

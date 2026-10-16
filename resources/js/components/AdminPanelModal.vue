@@ -670,8 +670,9 @@ onMounted(() => {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(15, 23, 42, 0.85);
-  backdrop-filter: blur(8px);
+  background: rgba(11, 22, 42, 0.55);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
   z-index: 9999;
   display: flex;
   align-items: center;
@@ -681,16 +682,16 @@ onMounted(() => {
 }
 
 .admin-card {
-  background: #0f172a;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 16px;
+  background: #ffffff;
+  border: 1px solid #e5e9f0;
+  border-radius: 17px;
   width: 100%;
   max-width: 900px;
   max-height: 85vh;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6);
-  color: #f1f5f9;
+  box-shadow: 0 16px 36px rgba(11, 22, 42, 0.15);
+  color: #172033;
   overflow: hidden;
   animation: slideUp 0.25s ease-out;
 }
@@ -700,7 +701,7 @@ onMounted(() => {
   justify-content: space-between;
   align-items: center;
   padding: 20px 24px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid #e5e9f0;
 }
 
 .header-left {
@@ -715,34 +716,35 @@ onMounted(() => {
 
 .modal-title {
   font-size: 1.25rem;
-  font-weight: 700;
+  font-weight: 800;
   margin: 0;
-  color: #ffffff;
+  color: #172033;
 }
 
 .modal-subtitle {
   font-size: 0.82rem;
-  color: #94a3b8;
+  color: #778399;
   margin: 2px 0 0;
 }
 
 .close-btn {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: #94a3b8;
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
+  background: #f1f3f6;
+  border: 0;
+  color: #64748b;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
+  font-size: 18px;
   transition: all 0.2s;
 }
 
 .close-btn:hover {
-  background: rgba(239, 68, 68, 0.2);
-  color: #f87171;
+  background: #e2e8f0;
+  color: #172033;
 }
 
 .tab-bar {

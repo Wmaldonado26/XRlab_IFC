@@ -2,12 +2,14 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\ConvertIfcJob;
 use App\Models\ConversionJob;
 use App\Models\Project;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
@@ -55,7 +57,7 @@ class ConversionTest extends TestCase
     {
         $fakeFile = UploadedFile::fake()->create('document.pdf', 100, 'application/pdf');
 
-        $response = $this->actingAs($this->normalUser)->postJson('/api/convert', [
+        $response = $this->actingAs($this->admin)->postJson('/api/convert', [
             'file' => $fakeFile,
         ]);
 
@@ -67,9 +69,11 @@ class ConversionTest extends TestCase
 
     public function test_authenticated_user_can_submit_ifc_and_receive_job(): void
     {
+        Queue::fake([ConvertIfcJob::class]);
+
         $fakeIfc = UploadedFile::fake()->create('edificio_prueba.ifc', 50, 'text/plain');
 
-        $response = $this->actingAs($this->normalUser)->postJson('/api/convert', [
+        $response = $this->actingAs($this->admin)->postJson('/api/convert', [
             'file' => $fakeIfc,
             'projectId' => $this->userProject->id,
         ]);

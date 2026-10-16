@@ -23,17 +23,22 @@ Route::prefix('auth')->group(function () {
 
 // Authenticated Project and Model routes (Row-level permission aware)
 Route::middleware(['auth.ifc'])->group(function () {
+    // Dashboard & Activity
+    Route::get('/dashboard/stats', [ProjectController::class, 'dashboardStats']);
+    Route::get('/activity', [ProjectController::class, 'activityLogs']);
+
     // Projects
     Route::get('/projects', [ProjectController::class, 'index']);
     Route::get('/projects/{id}', [ProjectController::class, 'show']);
+    Route::get('/projects/{id}/cover', [ProjectController::class, 'getCover']);
+    Route::get('/projects/{projectId}/models/{modelId}/download', [ModelController::class, 'downloadProjectModel']);
 
     // Models
     Route::get('/models', [ModelController::class, 'index']);
     Route::get('/models/{id}', [ModelController::class, 'show']);
     Route::get('/models/{id}/download', [ModelController::class, 'download']);
 
-    // Heavy Processing IFC -> FRAG Conversions
-    Route::post('/convert', [\App\Http\Controllers\ConversionController::class, 'convert']);
+    // Heavy Processing IFC -> FRAG Conversions (Status & Part Downloads for Viewer)
     Route::get('/jobs/{id}/progress', [\App\Http\Controllers\ConversionController::class, 'progress']);
     Route::get('/jobs/{id}/status', [\App\Http\Controllers\ConversionController::class, 'status']);
     Route::get('/jobs/{id}/download/{part}', [\App\Http\Controllers\ConversionController::class, 'download']);
@@ -41,6 +46,16 @@ Route::middleware(['auth.ifc'])->group(function () {
 
 // Admin Only routes
 Route::middleware(['auth.ifc', 'admin.ifc'])->group(function () {
+    // Heavy Processing IFC -> FRAG conversion initiation
+    Route::post('/convert', [\App\Http\Controllers\ConversionController::class, 'convert']);
+
+    // Resumable Chunked Uploads for Large IFC files (> 100MB up to multi-GB)
+    Route::post('/upload/init', [\App\Http\Controllers\ConversionController::class, 'initUpload']);
+    Route::post('/upload/chunk', [\App\Http\Controllers\ConversionController::class, 'chunkUpload']);
+    Route::get('/upload/status/{uploadId}', [\App\Http\Controllers\ConversionController::class, 'uploadStatus']);
+    Route::post('/upload/complete', [\App\Http\Controllers\ConversionController::class, 'completeUpload']);
+    Route::delete('/upload/cancel/{uploadId}', [\App\Http\Controllers\ConversionController::class, 'cancelUpload']);
+
     // User management
     Route::get('/users', [UserController::class, 'index']);
     Route::post('/users', [UserController::class, 'store']);
@@ -53,6 +68,8 @@ Route::middleware(['auth.ifc', 'admin.ifc'])->group(function () {
     // Project management
     Route::post('/projects', [ProjectController::class, 'store']);
     Route::match(['put', 'patch'], '/projects/{id}', [ProjectController::class, 'update']);
+    Route::post('/projects/{id}/cover', [ProjectController::class, 'uploadCover']);
+    Route::delete('/projects/{id}/cover', [ProjectController::class, 'deleteCover']);
     Route::delete('/projects/{id}', [ProjectController::class, 'destroy']);
 
     // Direct Model upload and delete (Admin only)
