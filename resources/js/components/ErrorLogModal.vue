@@ -60,6 +60,13 @@
           >
             Frontend ({{ frontendCount }})
           </button>
+          <button
+            class="pill-btn pill-telemetry"
+            :class="{ active: currentFilter === 'telemetry' }"
+            @click="currentFilter = 'telemetry'"
+          >
+            📊 Telemetría en Vivo
+          </button>
         </div>
 
         <div class="toolbar-actions">
@@ -87,33 +94,135 @@
 
       <!-- Terminal Output Container -->
       <div ref="terminalBodyRef" class="terminal-body">
-        <div v-if="filteredLogs.length === 0" class="empty-state">
-          <span class="empty-icon">✨</span>
-          <p class="empty-text">No hay registros que coincidan con el filtro actual.</p>
+        <!-- Dashboard de Telemetría en Vivo -->
+        <div v-if="currentFilter === 'telemetry'" class="telemetry-dashboard">
+          <div class="telemetry-header">
+            <div class="telemetry-title-group">
+              <span class="telemetry-live-dot"></span>
+              <h4 class="telemetry-title">Diagnóstico y Telemetría del Visor 3D en Tiempo Real</h4>
+            </div>
+            <span class="telemetry-timestamp">Muestreo: {{ new Date(telemetrySnapshot.timestamp).toLocaleTimeString() }}</span>
+          </div>
+
+          <div class="telemetry-grid">
+            <!-- WebGL Context Card -->
+            <div class="telemetry-card" :class="telemetrySnapshot.webglStatus === 'lost' ? 'card-danger' : 'card-success'">
+              <div class="card-icon">🎮</div>
+              <div class="card-info">
+                <span class="card-label">Contexto WebGL</span>
+                <span class="card-value">{{ telemetrySnapshot.webglStatus.toUpperCase() }}</span>
+                <span class="card-sub">Resolución: {{ telemetrySnapshot.canvasResolution }} (DPR: {{ telemetrySnapshot.devicePixelRatio }})</span>
+              </div>
+            </div>
+
+            <!-- Frame Rate & Latency -->
+            <div class="telemetry-card">
+              <div class="card-icon">⚡</div>
+              <div class="card-info">
+                <span class="card-label">Rendimiento Gráfico</span>
+                <span class="card-value">{{ telemetrySnapshot.fps }} <small>FPS</small></span>
+                <span class="card-sub">Latencia: {{ telemetrySnapshot.frameTimeMs }} ms / cuadro</span>
+              </div>
+            </div>
+
+            <!-- Three.js Pipeline -->
+            <div class="telemetry-card">
+              <div class="card-icon">📐</div>
+              <div class="card-info">
+                <span class="card-label">Pipeline Three.js</span>
+                <span class="card-value">{{ telemetrySnapshot.triangles.toLocaleString() }} <small>Δ</small></span>
+                <span class="card-sub">{{ telemetrySnapshot.drawCalls }} Draw Calls · {{ telemetrySnapshot.geometriesCount }} Geometrías</span>
+              </div>
+            </div>
+
+            <!-- JS Heap Memory -->
+            <div class="telemetry-card" :class="telemetrySnapshot.jsHeapUsedMB && telemetrySnapshot.jsHeapUsedMB > 1200 ? 'card-warning' : ''">
+              <div class="card-icon">🧠</div>
+              <div class="card-info">
+                <span class="card-label">Memoria JS Heap</span>
+                <template v-if="telemetrySnapshot.memoryApiSupported && telemetrySnapshot.jsHeapUsedMB !== null">
+                  <span class="card-value">{{ telemetrySnapshot.jsHeapUsedMB }} <small>MB</small></span>
+                  <span class="card-sub">Total: {{ telemetrySnapshot.jsHeapTotalMB }} MB / Límite: {{ telemetrySnapshot.jsHeapLimitMB }} MB</span>
+                </template>
+                <template v-else>
+                  <span class="card-value">N/D</span>
+                  <span class="card-sub">performance.memory no expuesto (WebKit/Safari)</span>
+                </template>
+              </div>
+            </div>
+
+            <!-- GPU VRAM Estimate -->
+            <div class="telemetry-card">
+              <div class="card-icon">🖥️</div>
+              <div class="card-info">
+                <span class="card-label">GPU VRAM Estimada</span>
+                <span class="card-value">~{{ telemetrySnapshot.gpuMemoryEstimatedMB }} <small>MB</small></span>
+                <span class="card-sub">Framebuffer MSAA + Buffers de Vértices</span>
+              </div>
+            </div>
+
+            <!-- Backend Free RAM -->
+            <div class="telemetry-card">
+              <div class="card-icon">🖧</div>
+              <div class="card-info">
+                <span class="card-label">RAM Microservicio Node.js</span>
+                <span class="card-value">{{ telemetrySnapshot.backendFreeMemoryGB !== null ? telemetrySnapshot.backendFreeMemoryGB + ' GB' : 'N/D' }}</span>
+                <span class="card-sub">Memoria RAM libre del servidor</span>
+              </div>
+            </div>
+
+            <!-- Load Session Metrics -->
+            <div class="telemetry-card full-width">
+              <div class="card-icon">⏱️</div>
+              <div class="card-info">
+                <span class="card-label">Sesión de Carga & Concurrencia</span>
+                <div class="load-metrics-inline">
+                  <span>Cargas activas: <strong>{{ telemetrySnapshot.concurrentLoads }}</strong></span>
+                  <span v-if="telemetrySnapshot.lastLoadDurationMs">Duración: <strong>{{ (telemetrySnapshot.lastLoadDurationMs / 1000).toFixed(2) }} s</strong></span>
+                  <span v-if="telemetrySnapshot.lastLoadBytes">Transferido: <strong>{{ (telemetrySnapshot.lastLoadBytes / (1024 * 1024)).toFixed(1) }} MB</strong></span>
+                  <span v-if="telemetrySnapshot.lastLoadPartsCount">Partes: <strong>{{ telemetrySnapshot.lastLoadPartsCount }}</strong></span>
+                  <span v-if="telemetrySnapshot.lastLoadSpeedMBs">Velocidad efectiva: <strong>{{ telemetrySnapshot.lastLoadSpeedMBs }} MB/s</strong></span>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
-        <div
-          v-for="log in filteredLogs"
-          :key="log.id"
-          class="log-row"
-          :class="`level-${log.level}`"
-        >
-          <span class="log-time">{{ log.timestamp }}</span>
-          <span class="log-origin" :class="`origin-${log.origin}`">
-            [{{ log.origin.toUpperCase() }}]
-          </span>
-          <span class="log-level" :class="`badge-${log.level}`">
-            {{ log.level.toUpperCase() }}
-          </span>
-          <span v-if="log.source" class="log-source">({{ log.source }})</span>
-          <pre class="log-message">{{ log.message }}</pre>
-        </div>
+        <!-- Terminal Logs Normales -->
+        <template v-else>
+          <div v-if="filteredLogs.length === 0" class="empty-state">
+            <span class="empty-icon">✨</span>
+            <p class="empty-text">No hay registros que coincidan con el filtro actual.</p>
+          </div>
+
+          <div
+            v-for="log in filteredLogs"
+            :key="log.id"
+            class="log-row"
+            :class="`level-${log.level}`"
+          >
+            <span class="log-time">{{ log.timestamp }}</span>
+            <span class="log-origin" :class="`origin-${log.origin}`">
+              [{{ log.origin.toUpperCase() }}]
+            </span>
+            <span class="log-level" :class="`badge-${log.level}`">
+              {{ log.level.toUpperCase() }}
+            </span>
+            <span v-if="log.source" class="log-source">({{ log.source }})</span>
+            <pre class="log-message">{{ log.message }}</pre>
+          </div>
+        </template>
       </div>
 
       <!-- Footer -->
       <div class="log-modal-footer">
         <span class="footer-stats">
-          Mostrando {{ filteredLogs.length }} de {{ allLogs.length }} entradas registradas
+          <template v-if="currentFilter === 'telemetry'">
+            Telemetría activa · Muestreo en vivo a 60 FPS
+          </template>
+          <template v-else>
+            Mostrando {{ filteredLogs.length }} de {{ allLogs.length }} entradas registradas
+          </template>
         </span>
         <button class="btn-footer-close" @click="close">
           Cerrar Consola
@@ -126,6 +235,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue';
 import { appLogger, type AppLogEntry } from '../services/logger';
+import { viewerDiagnostics, type ViewerDiagnosticsSnapshot } from '../services/viewer-diagnostics';
 
 const props = defineProps<{
   modelValue: boolean;
@@ -136,12 +246,15 @@ const emit = defineEmits<{
 }>();
 
 const allLogs = ref<AppLogEntry[]>([]);
-const currentFilter = ref<'all' | 'error' | 'warn' | 'backend' | 'frontend'>('all');
+const currentFilter = ref<'all' | 'error' | 'warn' | 'backend' | 'frontend' | 'telemetry'>('all');
 const searchQuery = ref('');
 const isCopied = ref(false);
 const terminalBodyRef = ref<HTMLDivElement | null>(null);
 
+const telemetrySnapshot = ref<ViewerDiagnosticsSnapshot>(viewerDiagnostics.getSnapshot());
+
 let unsubscribe: (() => void) | null = null;
+let diagUnsubscribe: (() => void) | null = null;
 let pollTimer: any = null;
 
 const syncLogs = () => {
@@ -215,6 +328,7 @@ watch(
   async (isOpen) => {
     if (isOpen) {
       await refreshLogs();
+      telemetrySnapshot.value = viewerDiagnostics.getSnapshot();
       nextTick(() => {
         if (terminalBodyRef.value) {
           terminalBodyRef.value.scrollTop = terminalBodyRef.value.scrollHeight;
@@ -230,6 +344,10 @@ onMounted(() => {
     syncLogs();
   });
 
+  diagUnsubscribe = viewerDiagnostics.subscribe((snap) => {
+    telemetrySnapshot.value = snap;
+  });
+
   pollTimer = setInterval(() => {
     if (props.modelValue) {
       appLogger.fetchBackendLogs();
@@ -239,6 +357,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (unsubscribe) unsubscribe();
+  if (diagUnsubscribe) diagUnsubscribe();
   if (pollTimer) clearInterval(pollTimer);
 });
 </script>
@@ -629,5 +748,166 @@ onUnmounted(() => {
 .btn-footer-close:hover {
   background: rgba(255, 255, 255, 0.16);
   border-color: rgba(255, 255, 255, 0.3);
+}
+
+/* Telemetry Dashboard Styles */
+.pill-telemetry {
+  background: rgba(16, 185, 129, 0.12);
+  border-color: rgba(16, 185, 129, 0.3);
+  color: #6ee7b7;
+}
+
+.pill-telemetry:hover,
+.pill-telemetry.active {
+  background: rgba(16, 185, 129, 0.25);
+  border-color: #34d399;
+  color: #a7f3d0;
+}
+
+.telemetry-dashboard {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.telemetry-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  padding-bottom: 10px;
+}
+
+.telemetry-title-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.telemetry-live-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background-color: #10b981;
+  box-shadow: 0 0 10px #10b981;
+  animation: pulse-green 1.5s infinite;
+}
+
+@keyframes pulse-green {
+  0% { transform: scale(0.9); opacity: 0.7; }
+  50% { transform: scale(1.2); opacity: 1; }
+  100% { transform: scale(0.9); opacity: 0.7; }
+}
+
+.telemetry-title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #f1f5f9;
+}
+
+.telemetry-timestamp {
+  font-size: 0.72rem;
+  color: #64748b;
+}
+
+.telemetry-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px;
+}
+
+.telemetry-card {
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px;
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  transition: transform 0.15s ease, border-color 0.15s ease;
+}
+
+.telemetry-card:hover {
+  border-color: rgba(56, 189, 248, 0.3);
+  transform: translateY(-2px);
+}
+
+.telemetry-card.full-width {
+  grid-column: 1 / -1;
+}
+
+.card-icon {
+  font-size: 1.8rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.card-info {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.card-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #94a3b8;
+  margin-bottom: 4px;
+}
+
+.card-value {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #f8fafc;
+  line-height: 1.2;
+}
+
+.card-value small {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: #94a3b8;
+}
+
+.card-sub {
+  font-size: 0.7rem;
+  color: #64748b;
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-success {
+  border-color: rgba(34, 197, 94, 0.35);
+  background: rgba(34, 197, 94, 0.05);
+}
+
+.card-warning {
+  border-color: rgba(245, 158, 11, 0.4);
+  background: rgba(245, 158, 11, 0.06);
+}
+
+.card-danger {
+  border-color: rgba(239, 68, 68, 0.45);
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.load-metrics-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: 0.8rem;
+  color: #cbd5e1;
+  margin-top: 6px;
+}
+
+.load-metrics-inline span strong {
+  color: #38bdf8;
 }
 </style>

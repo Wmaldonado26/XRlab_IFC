@@ -248,6 +248,7 @@ import {
     logout,
 } from "../services/auth-service";
 import { appLogger } from "../services/logger";
+import { viewerDiagnostics } from "../services/viewer-diagnostics";
 
 const props = defineProps<{
     initialProject?: BackendProject | null;
@@ -330,8 +331,10 @@ const startWasdLoop = () => {
 
     const loop = () => {
         const now = performance.now();
-        const delta = Math.min((now - lastWasdTime) / 1000, 0.1);
+        const deltaMs = now - lastWasdTime;
+        const delta = Math.min(deltaMs / 1000, 0.1);
         lastWasdTime = now;
+        viewerDiagnostics.onRenderFrame(deltaMs);
 
         if (activeKeys.size > 0 && world?.camera?.controls) {
             const controls = world.camera.controls as any;
@@ -474,6 +477,7 @@ const checkBackendAndRetry = async () => {
     }
 };
 
+let components: OBC.Components | null = null;
 let panel: any;
 let world: any;
 let fragmentManager: OBC.FragmentsManager;
@@ -540,9 +544,11 @@ onMounted(async () => {
 
     // Verificar disponibilidad del microservicio local y sondear periódicamente
     backendStatus.value = await checkBackendHealth();
+    viewerDiagnostics.setBackendFreeMemory(backendStatus.value.freeMemoryGB || 0);
     if (healthInterval) clearInterval(healthInterval);
     healthInterval = setInterval(async () => {
         backendStatus.value = await checkBackendHealth();
+        viewerDiagnostics.setBackendFreeMemory(backendStatus.value.freeMemoryGB || 0);
     }, 8000);
 
     // Inicializar contador de errores y suscribirse a nuevos eventos
@@ -551,7 +557,7 @@ onMounted(async () => {
 
     BUI.Manager.init();
 
-    const components = new OBC.Components();
+    components = new OBC.Components();
     const worlds = components.get(OBC.Worlds);
     world = worlds.create<
         OBC.SimpleScene,
@@ -571,6 +577,7 @@ onMounted(async () => {
     // Optimización crítica de GPU para tablets: limitar pixelRatio e interceptar resize
     if (world?.renderer?.three) {
         enforceSafePixelRatio();
+        viewerDiagnostics.registerRenderer(world.renderer);
 
         // Envolver resize de That Open Engine para garantizar que no vuelva a forzar pixelRatio = 2 en cada redibujado
         const originalResize = world.renderer.resize.bind(world.renderer);
@@ -603,13 +610,36 @@ onMounted(async () => {
     fragmentManager = components.get(OBC.FragmentsManager);
     fragmentManager.init("/worker.mjs");
 
-    world.camera.controls.addEventListener("rest", () =>
-        fragmentManager.core.update(true)
-    );
+    // Optimización de culling: limitar consultas masivas a 300ms y desactivar autoCoordinate innecesario
+    if (fragmentManager.core?.settings) {
+        fragmentManager.core.settings.maxUpdateRate = 300;
+        fragmentManager.core.settings.autoCoordinate = false;
+    }
 
-    // Al cargar cualquier modelo fragmentado, vincular a la escena y enfocar la cámara de manera debounced
+    world.camera.controls.addEventListener("rest", async () => {
+        try {
+            const models = Array.from(fragmentManager?.list?.values() || []);
+            const anyBusy = models.some((m: any) => m.isBusy);
+            if (!anyBusy) {
+                await fragmentManager.core.update(false);
+            }
+        } catch {}
+    });
+
+    // Al cargar cualquier modelo fragmentado, vincular cámara, clipping y calidad gráfica adaptativa
     fragmentManager.list.onItemSet.add(async ({ value: model }) => {
-        try { model.useCamera(world.camera.three); } catch {}
+        try {
+            if (world?.camera?.three) {
+                model.useCamera(world.camera.three);
+            }
+            // Enlace de planos de corte al culling del worker
+            model.getClippingPlanesEvent = () => (world?.renderer?.three?.clippingPlanes || []);
+
+            // Calidad gráfica adaptativa: 0.75 en tablet para reducir consumo de vértices/LOD, 1.0 en PC
+            if (isMobileOrTabletDevice()) {
+                model.graphicsQuality = 0.75;
+            }
+        } catch {}
         if (model.object && world?.scene?.three && !world.scene.three.children.includes(model.object)) {
             world.scene.three.add(model.object);
         }
@@ -779,12 +809,25 @@ onUnmounted(() => {
         clearInterval(healthInterval);
         healthInterval = null;
     }
+    if (fitCameraDebounceTimer) {
+        clearTimeout(fitCameraDebounceTimer);
+        fitCameraDebounceTimer = null;
+    }
     window.removeEventListener('keydown', handleKeyDown);
     window.removeEventListener('keyup', handleKeyUp);
     window.removeEventListener('blur', handleWindowBlur);
     if (wasdFrameId !== null) {
         cancelAnimationFrame(wasdFrameId);
     }
+    if (components) {
+        try {
+            components.dispose();
+        } catch (e) {
+            console.warn('[Viewer] Error al disponer components:', e);
+        }
+        components = null;
+    }
+    viewerDiagnostics.dispose();
 });
 
 const fitCameraToModels = async (targetModel?: any) => {
@@ -1022,18 +1065,6 @@ const clearScene = async () => {
             for (const m of models as any[]) {
                 if (m?.object && world?.scene?.three) {
                     world.scene.three.remove(m.object);
-                    m.object.traverse?.((child: any) => {
-                        if (child.geometry) {
-                            child.geometry.dispose?.();
-                        }
-                        if (child.material) {
-                            if (Array.isArray(child.material)) {
-                                child.material.forEach((mat: any) => mat?.dispose?.());
-                            } else {
-                                child.material.dispose?.();
-                            }
-                        }
-                    });
                 }
 
                 if (m?.modelId && typeof fragmentManager.core?.disposeModel === 'function') {
@@ -1124,6 +1155,7 @@ const loadCachedModel = async (id: string) => {
     loadingSubtitle.value = 'Carga instantánea sin consumo de red';
     loadingStage.value = 'Inyectando fragmentos en Three.js...';
 
+    viewerDiagnostics.markLoadStart(cached.parts.length, totalBytes);
     try {
         for (let i = 0; i < cached.parts.length; i++) {
             if (currentGen !== activeLoadGeneration || signal.aborted) return;
@@ -1198,6 +1230,7 @@ const loadCachedModel = async (id: string) => {
         if (currentGen === activeLoadGeneration) {
             isLoading.value = false;
         }
+        viewerDiagnostics.markLoadEnd();
     }
 };
 
@@ -1259,6 +1292,8 @@ const loadBackendProject = async (proj: BackendProject) => {
     let injectedCount = 0;
     let failedCount = 0;
 
+    const totalEstimatedBytes = (Number(proj.totalPartsSizeMB) || 0) * 1024 * 1024;
+    viewerDiagnostics.markLoadStart(proj.parts.length, totalEstimatedBytes);
     try {
         // Carga progresiva real: descarga fragmento i -> inyecta en GPU -> libera buffer -> descarga fragmento i+1
         // Evita por completo acumular todos los ArrayBuffers en memoria RAM simultáneamente.
@@ -1377,6 +1412,7 @@ const loadBackendProject = async (proj: BackendProject) => {
             isLoading.value = false;
             isBackendProcessing.value = false;
         }
+        viewerDiagnostics.markLoadEnd(failedCount === 0);
     }
 };
 
@@ -1404,6 +1440,7 @@ const loadBackendModel = async (model: BackendModelItem) => {
     loadingProgress.value = 20;
     loadingStage.value = 'Conectando con el almacenamiento local...';
 
+    viewerDiagnostics.markLoadStart(1, model.size || 0);
     try {
         let buffer: ArrayBuffer | null = await downloadModelFragment(model.id, signal);
         if (currentGen !== activeLoadGeneration || signal.aborted) return;
@@ -1467,6 +1504,7 @@ const loadBackendModel = async (model: BackendModelItem) => {
             isLoading.value = false;
             isBackendProcessing.value = false;
         }
+        viewerDiagnostics.markLoadEnd();
     }
 };
 
