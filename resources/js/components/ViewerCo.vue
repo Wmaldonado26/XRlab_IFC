@@ -227,6 +227,8 @@ import {
     checkBackendHealth,
     convertIfcViaBackend,
     downloadBackendFragments,
+    downloadBackendFragmentsProgressive,
+    downloadBackendFragmentPart,
     downloadModelFragment,
     uploadDirectFrag,
     type BackendHealth,
@@ -486,6 +488,7 @@ let updateModelsList: ((state?: any) => void) | null = null;
 const activeProjectId = ref<string | null>(null);
 const activeProjectName = ref<string>('');
 let activeLoadGeneration = 0;
+let currentLoadAbortController: AbortController | null = null;
 let isViewerReady = false;
 
 let healthInterval: any = null;
@@ -494,10 +497,21 @@ let healthInterval: any = null;
 const isMobileOrTabletDevice = (): boolean => {
     if (typeof window === 'undefined' || !window.navigator) return false;
     const ua = navigator.userAgent || '';
-    const isTouch = Boolean(navigator.maxTouchPoints && navigator.maxTouchPoints > 1);
-    const isMobileUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Tablet/i.test(ua);
-    const isIPadOS = /Macintosh/i.test(ua) && isTouch;
-    return isMobileUA || isIPadOS;
+    const isTouch = Boolean(navigator.maxTouchPoints && navigator.maxTouchPoints > 0);
+    const isMobileUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Tablet|Silk/i.test(ua);
+    const isIPadOS = (/Macintosh/i.test(ua) || /iPad/i.test(ua)) && isTouch;
+    const isAndroidTablet = /Android/i.test(ua) && !/Mobile/i.test(ua);
+    return isMobileUA || isIPadOS || isAndroidTablet;
+};
+
+// Optimización crítica de GPU: limita resolución efectiva para evitar que That Open Engine
+// o pantallas Retina de tablets creen framebuffers de 5400x4000 que provoquen el cierre por OOM.
+const enforceSafePixelRatio = () => {
+    if (!world?.renderer?.three) return;
+    const isMobile = isMobileOrTabletDevice();
+    const maxRatio = isMobile ? 1.0 : 1.5;
+    const safeRatio = Math.min(window.devicePixelRatio || 1, maxRatio);
+    world.renderer.three.setPixelRatio(safeRatio);
 };
 
 let fitCameraDebounceTimer: any = null;
@@ -554,20 +568,27 @@ onMounted(async () => {
 
     components.init();
 
-    // Optimización crítica de GPU para tablets: limitar pixelRatio a 1.0 en pantallas de alta densidad
+    // Optimización crítica de GPU para tablets: limitar pixelRatio e interceptar resize
     if (world?.renderer?.three) {
-        const isMobile = isMobileOrTabletDevice();
-        const maxRatio = isMobile ? 1.0 : 2.0;
-        world.renderer.three.setPixelRatio(Math.min(window.devicePixelRatio || 1, maxRatio));
+        enforceSafePixelRatio();
+
+        // Envolver resize de That Open Engine para garantizar que no vuelva a forzar pixelRatio = 2 en cada redibujado
+        const originalResize = world.renderer.resize.bind(world.renderer);
+        world.renderer.resize = (size?: any) => {
+            originalResize(size);
+            enforceSafePixelRatio();
+        };
 
         const canvas = world.renderer.three.domElement;
         if (canvas) {
             canvas.addEventListener('webglcontextlost', (event: Event) => {
                 event.preventDefault();
                 console.error('[WebGL] Contexto WebGL perdido por límite de GPU/memoria.');
-                appLogger.error('El navegador perdió el contexto WebGL por falta de memoria RAM.');
-                alert('El navegador se quedó sin memoria gráfica (WebGL Context Lost). Cierra otras pestañas o divide el modelo.');
-            });
+                appLogger.error('El navegador perdió el contexto WebGL por falta de memoria RAM/GPU.');
+                loadingMessage.value = 'Contexto WebGL perdido';
+                loadingStage.value = 'El dispositivo agotó la memoria gráfica. Cierra otras aplicaciones y pestañas.';
+                alert('El navegador se quedó sin memoria gráfica (WebGL Context Lost). En tablets o dispositivos con memoria limitada, se recomienda cerrar otras pestañas o dividir el modelo.');
+            }, false);
         }
     }
 
@@ -750,6 +771,10 @@ const togglePanel = () => {
 };
 
 onUnmounted(() => {
+    if (currentLoadAbortController) {
+        currentLoadAbortController.abort();
+        currentLoadAbortController = null;
+    }
     if (healthInterval) {
         clearInterval(healthInterval);
         healthInterval = null;
@@ -949,10 +974,20 @@ const setCameraPreset = (preset: 'top' | 'front' | 'side' | 'iso') => {
 };
 
 const clearScene = async () => {
+    // Cancelar cualquier descarga o inyección activa en curso
+    if (currentLoadAbortController) {
+        currentLoadAbortController.abort();
+        currentLoadAbortController = null;
+    }
+
     // Incrementar generación para invalidar cargas asíncronas pendientes
     activeLoadGeneration++;
     activeProjectId.value = null;
     activeProjectName.value = '';
+
+    // Liberar referencias a buffers crudos en memoria para permitir recolección de basura
+    lastFragmentBytes = null;
+    lastFragmentBuffers = [];
 
     // 1. Limpiar highlighter y selecciones activas (con timeout de seguridad para evitar bloqueos)
     if (highlighter) {
@@ -1070,13 +1105,20 @@ const loadCachedModel = async (id: string) => {
     }
 
     await clearScene();
+    if (currentLoadAbortController) {
+        currentLoadAbortController.abort();
+        currentLoadAbortController = null;
+    }
+    currentLoadAbortController = new AbortController();
+    const signal = currentLoadAbortController.signal;
+
     const currentGen = ++activeLoadGeneration;
     activeProjectId.value = id;
 
     isLoading.value = true;
     loadingProgress.value = 15;
     loadingFileName.value = cached.name;
-    const totalBytes = cached.parts.reduce((a, b) => a + b.byteLength, 0);
+    const totalBytes = cached.parts.reduce((a, b) => a + (b ? b.byteLength : 0), 0);
     loadingFileSize.value = `${(totalBytes / (1024 * 1024)).toFixed(1)} MB (Caché Local)`;
     loadingMessage.value = 'Cargando desde Caché Local IndexedDB...';
     loadingSubtitle.value = 'Carga instantánea sin consumo de red';
@@ -1084,9 +1126,10 @@ const loadCachedModel = async (id: string) => {
 
     try {
         for (let i = 0; i < cached.parts.length; i++) {
-            if (currentGen !== activeLoadGeneration) return;
+            if (currentGen !== activeLoadGeneration || signal.aborted) return;
             const buf = cached.parts[i];
-            const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+            if (!buf) continue;
+            let bytes: Uint8Array | null = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
             const partName = (cached.partNames && cached.partNames[i]) || `${cached.name || id}_part_${i + 1}`;
             const cleanModelId = partName.replace(/\.frag$/i, '');
             let loadedModel: any = null;
@@ -1100,7 +1143,12 @@ const loadCachedModel = async (id: string) => {
                     console.error(`[FRAG-CACHE] Fallo al cargar parte "${cleanModelId}":`, errRaw);
                 }
             }
-            if (loadedModel) {
+
+            // Liberar referencia al buffer de este fragmento para permitir al GC reclamar RAM
+            cached.parts[i] = null as any;
+            bytes = null;
+
+            if (loadedModel && currentGen === activeLoadGeneration && !signal.aborted) {
                 const modelKey = cleanModelId;
                 if (!fragmentManager.list.has(modelKey)) {
                     fragmentManager.list.set(modelKey, loadedModel);
@@ -1115,7 +1163,7 @@ const loadCachedModel = async (id: string) => {
             loadingProgress.value = Math.round(((i + 1) / cached.parts.length) * 90);
         }
 
-        if (currentGen !== activeLoadGeneration) return;
+        if (currentGen !== activeLoadGeneration || signal.aborted) return;
 
         try {
             await fragmentManager.core.update(true);
@@ -1128,17 +1176,21 @@ const loadCachedModel = async (id: string) => {
 
         loadingProgress.value = 100;
         loadingStage.value = 'Encuadrando vista de cámara...';
+        enforceSafePixelRatio();
         nextTick(() => {
             world?.renderer?.resize?.();
+            enforceSafePixelRatio();
             window.dispatchEvent(new Event('resize'));
         });
         setTimeout(async () => {
-            if (currentGen === activeLoadGeneration) {
+            if (currentGen === activeLoadGeneration && !signal.aborted) {
+                world?.renderer?.resize?.();
+                enforceSafePixelRatio();
                 await fitCameraToModels();
             }
         }, 150);
     } catch (err: any) {
-        if (currentGen === activeLoadGeneration) {
+        if (currentGen === activeLoadGeneration && !signal.aborted) {
             console.error('Error cargando desde caché:', err);
             alert(`Error al cargar modelo desde caché: ${err.message}`);
         }
@@ -1177,6 +1229,14 @@ const loadBackendProject = async (proj: BackendProject) => {
     // Limpiar modelos del proyecto anterior antes de cargar el nuevo para garantizar aislamiento estricto
     await clearScene();
 
+    // Iniciar nuevo AbortController para esta sesión de carga
+    if (currentLoadAbortController) {
+        currentLoadAbortController.abort();
+        currentLoadAbortController = null;
+    }
+    currentLoadAbortController = new AbortController();
+    const signal = currentLoadAbortController.signal;
+
     // Establecer nueva generación y registrar projectId activo
     const currentGen = ++activeLoadGeneration;
     activeProjectId.value = proj.id;
@@ -1191,73 +1251,31 @@ const loadBackendProject = async (proj: BackendProject) => {
     isBackendProcessing.value = true;
     loadingFileName.value = proj.name || proj.fileName;
     loadingFileSize.value = `${proj.totalPartsSizeMB || '0'} MB`;
-    loadingMessage.value = 'Descargando fragmentos del almacenamiento local...';
-    loadingSubtitle.value = `Descarga directa de ${proj.parts.length} partes`;
+    loadingMessage.value = 'Carga progresiva de fragmentos...';
+    loadingSubtitle.value = `Procesando ${proj.parts.length} partes secuencialmente`;
     loadingProgress.value = 10;
     loadingStage.value = 'Conectando con el backend...';
 
+    let injectedCount = 0;
+    let failedCount = 0;
+
     try {
-        let buffers: ArrayBuffer[] = [];
-        let usedCache = false;
+        // Carga progresiva real: descarga fragmento i -> inyecta en GPU -> libera buffer -> descarga fragmento i+1
+        // Evita por completo acumular todos los ArrayBuffers en memoria RAM simultáneamente.
+        await downloadBackendFragmentsProgressive(
+            proj.id,
+            proj.parts,
+            async (buffer: ArrayBuffer, index: number, total: number, partName: string) => {
+                if (currentGen !== activeLoadGeneration || signal.aborted) return;
 
-        const cached = await getProjectFragments(proj.id);
-        const hasValidCache = Boolean(
-            cached &&
-            Array.isArray(cached.parts) &&
-            cached.parts.length >= (proj.parts?.length || 1) &&
-            cached.parts.every((p) => p && p.byteLength > 1024)
-        );
-
-        if (hasValidCache && cached) {
-            appLogger.info(`[Viewer] Cargando fragmentos desde caché local (${cached.parts.length} partes).`);
-            buffers = cached.parts;
-            usedCache = true;
-        } else {
-            buffers = await downloadBackendFragments(proj.id, proj.parts, (loaded, total) => {
-                if (currentGen === activeLoadGeneration) {
-                    loadingProgress.value = Math.round((loaded / total) * 70);
-                    loadingStage.value = `Descargando fragmento ${loaded} de ${total}...`;
-                }
-            });
-
-            // Verificar si la generación cambió durante la descarga asíncrona
-            if (currentGen !== activeLoadGeneration) {
-                appLogger.info(`Carga cancelada: el proyecto activo cambió durante la descarga.`);
-                return;
-            }
-
-            // Guardar automáticamente en IndexedDB solo si es Desktop y tamaño menor a 60MB (evita clonaciones de 258MB en tablets)
-            const isMobile = isMobileOrTabletDevice();
-            const projectSizeMB = Number(proj.totalPartsSizeMB) || 0;
-            if (buffers.length > 0 && !isMobile && projectSizeMB < 60) {
-                saveProjectFragments(proj.id, proj.name || proj.fileName, buffers, proj.parts).catch(console.warn);
-            }
-        }
-
-        const injectFragments = async (buffersToInject: ArrayBuffer[]) => {
-            loadingStage.value = 'Inyectando fragmentos en la escena 3D...';
-            lastFragmentBuffers = [];
-
-            const isMobile = isMobileOrTabletDevice();
-
-            for (let i = 0; i < buffersToInject.length; i++) {
-                if (currentGen !== activeLoadGeneration) return;
-
-                const buf = buffersToInject[i];
-                if (!buf) continue;
-                const partName = (proj.parts && proj.parts[i]) || `${proj.name || 'model'}_part_${i + 1}.frag`;
+                loadingStage.value = `Inyectando en GPU: ${partName} (${index + 1}/${total})...`;
                 const cleanModelId = partName.replace(/\.frag$/i, '');
 
                 if (fragmentManager && fragmentManager.list.has(cleanModelId)) {
-                    continue;
+                    return;
                 }
 
-                const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-                if (!isMobile) {
-                    lastFragmentBytes = bytes;
-                    lastFragmentBuffers.push(bytes);
-                }
-
+                let bytes: Uint8Array | null = new Uint8Array(buffer);
                 let loadedModel: any = null;
                 try {
                     loadedModel = await fragmentManager.core.load(bytes as any, { modelId: cleanModelId, raw: false });
@@ -1266,14 +1284,16 @@ const loadBackendProject = async (proj: BackendProject) => {
                     try {
                         loadedModel = await fragmentManager.core.load(bytes as any, { modelId: cleanModelId, raw: true });
                     } catch (errRaw) {
-                        console.error(`[FRAG] Fallo definitivo al cargar parte "${cleanModelId}":`, errRaw);
+                        failedCount++;
+                        console.error(`[FRAG] Fallo al cargar fragmento "${cleanModelId}":`, errRaw);
+                        appLogger.warn(`Fragmento ${partName} no pudo ser cargado: ${errRaw instanceof Error ? errRaw.message : String(errRaw)}`);
                     }
                 }
 
-                // Liberar referencia al buffer crudo inmediatamente para que Garbage Collector reclame la RAM
-                buffersToInject[i] = null as any;
+                // Liberar referencia binaria inmediatamente para recuperación de RAM
+                bytes = null;
 
-                if (loadedModel) {
+                if (loadedModel && currentGen === activeLoadGeneration && !signal.aborted) {
                     const modelKey = cleanModelId;
                     if (!fragmentManager.list.has(modelKey)) {
                         fragmentManager.list.set(modelKey, loadedModel);
@@ -1284,31 +1304,29 @@ const loadBackendProject = async (proj: BackendProject) => {
                     if (loadedModel.object && world?.scene?.three && !world.scene.three.children.includes(loadedModel.object)) {
                         world.scene.three.add(loadedModel.object);
                     }
-                    console.log(`[FRAG] Modelo ${cleanModelId} inyectado en escena 3D (${i + 1}/${buffersToInject.length})`);
+                    injectedCount++;
+                    console.log(`[FRAG] Modelo ${cleanModelId} inyectado en escena 3D (${index + 1}/${total})`);
+                }
+
+                if (currentGen === activeLoadGeneration && !signal.aborted) {
+                    loadingProgress.value = Math.min(92, Math.round(((index + 1) / total) * 90));
+                    loadingStage.value = `Fragmento ${index + 1} de ${total} cargado`;
+                }
+            },
+            {
+                signal,
+                onProgress: (loaded, total, stage) => {
+                    if (currentGen === activeLoadGeneration && !signal.aborted) {
+                        loadingStage.value = stage;
+                        loadingProgress.value = Math.max(10, Math.round((loaded / total) * 85));
+                    }
                 }
             }
-        };
+        );
 
-        try {
-            await injectFragments(buffers);
-        } catch (injectionErr) {
-            if (usedCache) {
-                console.warn('[Viewer] Inyección desde caché falló, purgando caché e intentando descarga directa:', injectionErr);
-                await deleteCachedProject(proj.id);
-                buffers = await downloadBackendFragments(proj.id, proj.parts);
-                await injectFragments(buffers);
-                const isMobile = isMobileOrTabletDevice();
-                const projectSizeMB = Number(proj.totalPartsSizeMB) || 0;
-                if (buffers.length > 0 && !isMobile && projectSizeMB < 60) {
-                    saveProjectFragments(proj.id, proj.name || proj.fileName, buffers, proj.parts).catch(console.warn);
-                }
-            } else {
-                throw injectionErr;
-            }
-        }
-
-        // Verificar si la generación cambió tras inyectar todos los fragmentos
-        if (currentGen !== activeLoadGeneration) {
+        // Verificar si la generación cambió o se canceló durante el proceso progresivo
+        if (currentGen !== activeLoadGeneration || signal.aborted) {
+            appLogger.info('Carga cancelada: el proyecto activo cambió o fue interrumpido.');
             return;
         }
 
@@ -1325,19 +1343,31 @@ const loadBackendProject = async (proj: BackendProject) => {
         loadingProgress.value = 100;
         loadingStage.value = 'Encuadrando vista de cámara...';
 
+        enforceSafePixelRatio();
+
         nextTick(() => {
             world?.renderer?.resize?.();
+            enforceSafePixelRatio();
             window.dispatchEvent(new Event('resize'));
         });
 
         setTimeout(async () => {
-            if (currentGen === activeLoadGeneration) {
+            if (currentGen === activeLoadGeneration && !signal.aborted) {
                 world?.renderer?.resize?.();
+                enforceSafePixelRatio();
                 await fitCameraToModels();
             }
         }, 150);
-        appLogger.info(`Proyecto cargado exitosamente: ${proj.name || proj.fileName}`);
+
+        const summaryMsg = failedCount > 0
+            ? `Proyecto cargado con advertencias: ${injectedCount}/${proj.parts.length} fragmentos (${failedCount} fallaron).`
+            : `Proyecto cargado exitosamente: ${proj.name || proj.fileName} (${injectedCount} fragmentos).`;
+        appLogger.info(summaryMsg);
     } catch (err: any) {
+        if (signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
+            console.log('[Viewer] Carga de proyecto cancelada por el usuario o cambio de proyecto.');
+            return;
+        }
         if (currentGen === activeLoadGeneration) {
             console.error('Error cargando proyecto del backend:', err);
             alert(`Error al descargar proyecto: ${err.message}`);
@@ -1354,6 +1384,13 @@ const loadBackendModel = async (model: BackendModelItem) => {
     const cleanModelId = model.name.replace(/\.frag$/i, '');
 
     await clearScene();
+    if (currentLoadAbortController) {
+        currentLoadAbortController.abort();
+        currentLoadAbortController = null;
+    }
+    currentLoadAbortController = new AbortController();
+    const signal = currentLoadAbortController.signal;
+
     const currentGen = ++activeLoadGeneration;
     activeProjectId.value = model.projectId || model.id;
     activeProjectName.value = model.projectName || model.name || '';
@@ -1368,17 +1405,13 @@ const loadBackendModel = async (model: BackendModelItem) => {
     loadingStage.value = 'Conectando con el almacenamiento local...';
 
     try {
-        let buffer: any = await downloadModelFragment(model.id);
-        if (currentGen !== activeLoadGeneration) return;
+        let buffer: ArrayBuffer | null = await downloadModelFragment(model.id, signal);
+        if (currentGen !== activeLoadGeneration || signal.aborted) return;
 
         loadingProgress.value = 75;
         loadingStage.value = 'Inyectando fragmento en GPU y escena 3D...';
 
-        const isMobile = isMobileOrTabletDevice();
-        const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
-        if (!isMobile) {
-            lastFragmentBytes = bytes;
-        }
+        let bytes: Uint8Array | null = new Uint8Array(buffer);
         let loadedModel: any = null;
         try {
             loadedModel = await fragmentManager.core.load(bytes as any, { modelId: cleanModelId, raw: false });
@@ -1386,10 +1419,11 @@ const loadBackendModel = async (model: BackendModelItem) => {
             loadedModel = await fragmentManager.core.load(bytes as any, { modelId: cleanModelId, raw: true });
         }
 
-        // Liberar referencia al buffer de descarga
-        (buffer as any) = null;
+        // Liberar referencias al buffer de descarga inmediatamente
+        buffer = null;
+        bytes = null;
 
-        if (loadedModel) {
+        if (loadedModel && currentGen === activeLoadGeneration && !signal.aborted) {
             const modelKey = cleanModelId || loadedModel.modelId || loadedModel.id;
             if (!fragmentManager.list.has(modelKey)) {
                 fragmentManager.list.set(modelKey, loadedModel);
@@ -1402,7 +1436,7 @@ const loadBackendModel = async (model: BackendModelItem) => {
             }
         }
 
-        if (currentGen !== activeLoadGeneration) return;
+        if (currentGen !== activeLoadGeneration || signal.aborted) return;
 
         if (updateModelsList) {
             updateModelsList();
@@ -1411,13 +1445,19 @@ const loadBackendModel = async (model: BackendModelItem) => {
 
         loadingProgress.value = 100;
         loadingStage.value = 'Encuadrando vista de cámara...';
+        enforceSafePixelRatio();
         setTimeout(async () => {
-            if (currentGen === activeLoadGeneration) {
+            if (currentGen === activeLoadGeneration && !signal.aborted) {
+                world?.renderer?.resize?.();
+                enforceSafePixelRatio();
                 await fitCameraToModels();
             }
         }, 150);
         appLogger.info(`Modelo persistente cargado con éxito: ${model.name}`);
     } catch (err: any) {
+        if (signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
+            return;
+        }
         if (currentGen === activeLoadGeneration) {
             console.error('Error cargando modelo del backend:', err);
             alert(`Error al descargar o inyectar modelo: ${err.message}`);

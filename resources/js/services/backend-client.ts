@@ -854,8 +854,8 @@ export async function deleteBackendModel(id: string): Promise<{ success: boolean
   return res.json();
 }
 
-export async function downloadModelFragment(modelId: string): Promise<ArrayBuffer> {
-  const res = await fetch(`/api/models/${modelId}/download`, { credentials: 'include' });
+export async function downloadModelFragment(modelId: string, signal?: AbortSignal): Promise<ArrayBuffer> {
+  const res = await fetch(`/api/models/${encodeURIComponent(modelId)}/download`, { credentials: 'include', signal });
   if (!res.ok) {
     const errData = await res.json().catch(() => ({}));
     throw new Error(errData.error || `Error descargando archivo FRAG (${res.status})`);
@@ -863,52 +863,110 @@ export async function downloadModelFragment(modelId: string): Promise<ArrayBuffe
   return res.arrayBuffer();
 }
 
+/**
+ * Downloads a single FRAG part for a project/job with full AbortSignal support
+ * and prioritized fallback endpoints.
+ */
+export async function downloadBackendFragmentPart(
+  jobId: string,
+  part: string,
+  index: number,
+  signal?: AbortSignal
+): Promise<ArrayBuffer> {
+  if (signal?.aborted) {
+    throw new DOMException('Descarga cancelada por el usuario', 'AbortError');
+  }
+
+  // 1. Try project-scoped download (/api/projects/{projectId}/models/{modelIdOrName}/download)
+  let res = await fetch(
+    `/api/projects/${encodeURIComponent(jobId)}/models/${encodeURIComponent(part)}/download`,
+    { credentials: 'include', signal }
+  );
+  if (!res.ok) {
+    // 2. Try direct conversion job part download
+    res = await fetch(
+      `/api/jobs/${encodeURIComponent(jobId)}/download/${encodeURIComponent(part)}`,
+      { credentials: 'include', signal }
+    );
+  }
+  if (!res.ok) {
+    // 3. Try conversion job 1-based index download
+    res = await fetch(
+      `/api/jobs/${encodeURIComponent(jobId)}/download/${index + 1}`,
+      { credentials: 'include', signal }
+    );
+  }
+  if (!res.ok) {
+    // 4. Try global model download (/api/models/{id}/download)
+    res = await fetch(
+      `/api/models/${encodeURIComponent(part)}/download`,
+      { credentials: 'include', signal }
+    );
+  }
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const errJson = await res.json();
+      if (errJson.error) detail += `: ${errJson.error}`;
+    } catch {
+      const errText = await res.text().catch(() => '');
+      if (errText) detail += `: ${errText}`;
+    }
+    throw new Error(`Error descargando fragmento "${part}" del proyecto "${jobId}" (${detail})`);
+  }
+  return res.arrayBuffer();
+}
+
+/**
+ * Progressive fragment downloader: sequentially downloads a fragment, calls the
+ * async consumer callback (e.g. GPU injection), and lets the browser free references
+ * before downloading the next part. Avoids holding multi-gigabyte ArrayBuffers in RAM.
+ */
+export async function downloadBackendFragmentsProgressive(
+  jobId: string,
+  parts: string[],
+  onFragment: (buffer: ArrayBuffer, index: number, total: number, partName: string) => Promise<void>,
+  options?: {
+    signal?: AbortSignal;
+    onProgress?: (loaded: number, total: number, stage: string) => void;
+  }
+): Promise<void> {
+  const total = parts.length;
+  for (let i = 0; i < total; i++) {
+    if (options?.signal?.aborted) {
+      throw new DOMException('Descarga cancelada por el usuario', 'AbortError');
+    }
+    const part = parts[i];
+    options?.onProgress?.(i, total, `Descargando fragmento ${i + 1} de ${total}...`);
+
+    let buffer: ArrayBuffer | null = await downloadBackendFragmentPart(
+      jobId,
+      part,
+      i,
+      options?.signal
+    );
+
+    options?.onProgress?.(i + 1, total, `Inyectando fragmento ${i + 1} de ${total}...`);
+    await onFragment(buffer, i, total, part);
+    buffer = null; // Liberar referencia inmediatamente
+  }
+}
+
+/**
+ * Legacy batch downloader kept for backward compatibility with existing callers.
+ */
 export async function downloadBackendFragments(
   jobId: string,
   parts: string[],
-  onProgress?: (loaded: number, total: number) => void
+  onProgress?: (loaded: number, total: number) => void,
+  signal?: AbortSignal
 ): Promise<ArrayBuffer[]> {
   const buffers: ArrayBuffer[] = [];
   for (let i = 0; i < parts.length; i++) {
-    const part = parts[i];
-    // 1. Try project-scoped download (/api/projects/{projectId}/models/{modelIdOrName}/download)
-    let res = await fetch(
-      `/api/projects/${encodeURIComponent(jobId)}/models/${encodeURIComponent(part)}/download`,
-      { credentials: 'include' }
-    );
-    if (!res.ok) {
-      // 2. Try direct conversion job part download
-      res = await fetch(
-        `/api/jobs/${encodeURIComponent(jobId)}/download/${encodeURIComponent(part)}`,
-        { credentials: 'include' }
-      );
+    if (signal?.aborted) {
+      throw new DOMException('Descarga cancelada por el usuario', 'AbortError');
     }
-    if (!res.ok) {
-      // 3. Try conversion job 1-based index download
-      res = await fetch(
-        `/api/jobs/${encodeURIComponent(jobId)}/download/${i + 1}`,
-        { credentials: 'include' }
-      );
-    }
-    if (!res.ok) {
-      // 4. Try global model download (/api/models/{id}/download)
-      res = await fetch(
-        `/api/models/${encodeURIComponent(part)}/download`,
-        { credentials: 'include' }
-      );
-    }
-    if (!res.ok) {
-      let detail = `HTTP ${res.status}`;
-      try {
-        const errJson = await res.json();
-        if (errJson.error) detail += `: ${errJson.error}`;
-      } catch {
-        const errText = await res.text().catch(() => '');
-        if (errText) detail += `: ${errText}`;
-      }
-      throw new Error(`Error descargando fragmento "${part}" del proyecto "${jobId}" (${detail})`);
-    }
-    const buf = await res.arrayBuffer();
+    const buf = await downloadBackendFragmentPart(jobId, parts[i], i, signal);
     buffers.push(buf);
     onProgress?.(i + 1, parts.length);
   }
