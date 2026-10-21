@@ -27,3 +27,6 @@ vista prueba/
 .agents/
 skills-lock.json
 
+
+# Modelos FRAG: mantener fuera de Git
+*.frag
