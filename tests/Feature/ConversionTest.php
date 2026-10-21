@@ -3,12 +3,14 @@
 namespace Tests\Feature;
 
 use App\Jobs\ConvertIfcJob;
+use App\Services\ChunkUploadService;
 use App\Models\ConversionJob;
 use App\Models\Project;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
@@ -127,5 +129,31 @@ class ConversionTest extends TestCase
                 'progress' => 100,
                 'parts' => ['parte1.frag'],
             ]);
+    }
+
+    public function test_chunk_completion_hides_internal_exception_details(): void
+    {
+        $internalMessage = 'Sensitive path: C:\\private\\ifc\\original.ifc';
+        $this->mock(ChunkUploadService::class, function ($mock) use ($internalMessage): void {
+            $mock->shouldReceive('completeUpload')
+                ->once()
+                ->andThrow(new \RuntimeException($internalMessage));
+        });
+        Log::shouldReceive('error')
+            ->once()
+            ->with('Chunked IFC upload completion failed.', \Mockery::on(
+                fn (array $context): bool => ($context['upload_id'] ?? null) === 'test-upload'
+                    && ($context['exception'] ?? null) instanceof \RuntimeException
+            ));
+
+        $response = $this->actingAs($this->admin)->postJson('/api/upload/complete', [
+            'uploadId' => 'test-upload',
+        ]);
+
+        $response->assertStatus(500)
+            ->assertJson([
+                'error' => 'No se pudo completar la carga. Intente nuevamente o contacte al administrador.',
+            ])
+            ->assertDontSee($internalMessage);
     }
 }

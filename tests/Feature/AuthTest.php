@@ -5,6 +5,9 @@ namespace Tests\Feature;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Notification;
+use Illuminate\Support\Facades\Password;
+use Illuminate\Auth\Notifications\ResetPassword as ResetPasswordNotification;
 use Tests\TestCase;
 
 class AuthTest extends TestCase
@@ -60,6 +63,57 @@ class AuthTest extends TestCase
             ]);
 
         $this->assertGuest();
+    }
+
+    public function test_password_reset_request_does_not_reveal_if_email_exists(): void
+    {
+        Notification::fake();
+        $user = User::factory()->create(['email' => 'reset-user@example.test']);
+
+        $knownEmail = $this->postJson('/api/auth/forgot-password', [
+            'email' => $user->email,
+        ]);
+        $unknownEmail = $this->postJson('/api/auth/forgot-password', [
+            'email' => 'unknown@example.test',
+        ]);
+
+        $knownEmail->assertOk()->assertJsonPath('success', true);
+        $unknownEmail->assertOk()->assertExactJson($knownEmail->json());
+        Notification::assertSentTo($user, ResetPasswordNotification::class);
+
+        $notification = Notification::sent($user, ResetPasswordNotification::class)->first();
+        $this->assertStringContainsString('#reset-password?token=', $notification->toMail($user)->actionUrl);
+    }
+
+    public function test_user_can_reset_password_with_valid_token(): void
+    {
+        $user = User::factory()->create(['email' => 'reset-user@example.test']);
+        $token = Password::createToken($user);
+
+        $response = $this->postJson('/api/auth/reset-password', [
+            'email' => $user->email,
+            'token' => $token,
+            'password' => 'NewSecurePassword2026!',
+            'password_confirmation' => 'NewSecurePassword2026!',
+        ]);
+
+        $response->assertOk()->assertJsonPath('success', true);
+        $this->assertTrue(Hash::check('NewSecurePassword2026!', $user->fresh()->password));
+    }
+
+    public function test_password_reset_rejects_invalid_token(): void
+    {
+        $user = User::factory()->create(['email' => 'reset-user@example.test']);
+
+        $response = $this->postJson('/api/auth/reset-password', [
+            'email' => $user->email,
+            'token' => 'invalid-token',
+            'password' => 'NewSecurePassword2026!',
+            'password_confirmation' => 'NewSecurePassword2026!',
+        ]);
+
+        $response->assertUnprocessable()->assertJsonPath('success', false);
+        $this->assertFalse(Hash::check('NewSecurePassword2026!', $user->fresh()->password));
     }
 
     public function test_me_endpoint_returns_authenticated_user(): void
@@ -144,5 +198,23 @@ class AuthTest extends TestCase
             ->assertJson([
                 'success' => true,
             ]);
+    }
+
+    public function test_admin_can_filter_and_paginate_users(): void
+    {
+        User::factory()->count(30)->sequence(fn ($sequence) => [
+            'role' => $sequence->index % 2 === 0 ? 'user' : 'admin',
+            'is_active' => $sequence->index % 3 !== 0,
+        ])->create();
+
+        $admin = User::where('email', 'admin@ifcxrlab.local')->first();
+        $response = $this->actingAs($admin)->getJson('/api/users?page=2&per_page=3&role=user&status=active');
+
+        $response->assertOk()
+            ->assertJsonCount(3, 'users')
+            ->assertJsonPath('pagination.currentPage', 2)
+            ->assertJsonPath('pagination.lastPage', 4)
+            ->assertJsonPath('pagination.perPage', 3)
+            ->assertJsonPath('pagination.total', 10);
     }
 }

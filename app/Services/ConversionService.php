@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Jobs\ConvertIfcJob;
 use App\Models\BimModel;
 use App\Models\ConversionJob;
+use App\Services\ActivityLogger;
 use App\Models\Project;
 use App\Models\User;
 use App\Repositories\ProjectRepository;
@@ -19,10 +20,12 @@ use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 class ConversionService
 {
     protected ProjectRepository $projectRepository;
+    protected ActivityLogger $activityLogger;
 
-    public function __construct(ProjectRepository $projectRepository)
+    public function __construct(ProjectRepository $projectRepository, ActivityLogger $activityLogger)
     {
         $this->projectRepository = $projectRepository;
+        $this->activityLogger = $activityLogger;
     }
 
     /**
@@ -77,6 +80,7 @@ class ConversionService
         $job = ConversionJob::create([
             'id' => $jobId,
             'project_id' => $targetProject->id,
+            'user_id' => $user->id,
             'status' => 'queued',
             'progress' => 0,
             'stage' => 'En cola de conversión',
@@ -84,6 +88,7 @@ class ConversionService
             'original_ifc_path' => $intactIfcPath,
             'total_size_bytes' => $totalBytes,
         ]);
+        $this->activityLogger->record('Conversión en cola', 'conversion', $job->id, $cleanName, (string) $targetProject->id, [], $user);
 
         // 3. Dispatch background job
         ConvertIfcJob::dispatch($job->id, $intactIfcPath, $targetProject->id, $cleanName);
@@ -122,6 +127,7 @@ class ConversionService
         $job = ConversionJob::create([
             'id' => $jobId,
             'project_id' => $targetProject->id,
+            'user_id' => $user->id,
             'status' => 'queued',
             'progress' => 0,
             'stage' => 'En cola de conversión',
@@ -129,6 +135,7 @@ class ConversionService
             'original_ifc_path' => $intactIfcPath,
             'total_size_bytes' => $totalBytes,
         ]);
+        $this->activityLogger->record('Conversión en cola', 'conversion', $job->id, $originalFileName, (string) $targetProject->id, [], $user);
 
         // Dispatch background job
         ConvertIfcJob::dispatch($job->id, $intactIfcPath, $targetProject->id, $originalFileName);
@@ -264,14 +271,22 @@ class ConversionService
             throw new AccessDeniedHttpException('Acceso denegado a las partes de este proyecto.');
         }
 
-        $relPath = "{$job->project_id}/{$part}";
+        $relPath = "FragComver/{$job->project_id}/{$part}";
+
+        if (! Storage::disk('models')->exists($relPath)) {
+            // Support files created before conversion outputs moved under FragComver.
+            $relPath = "{$job->project_id}/{$part}";
+        }
 
         if (! Storage::disk('models')->exists($relPath)) {
             // Also check if part was given by numeric index (1-based)
             $parts = $job->parts_json ?: [];
             $idx = is_numeric($part) ? ((int) $part) - 1 : -1;
             if (isset($parts[$idx])) {
-                $relPath = "{$job->project_id}/{$parts[$idx]}";
+                $relPath = "FragComver/{$job->project_id}/{$parts[$idx]}";
+                if (! Storage::disk('models')->exists($relPath)) {
+                    $relPath = "{$job->project_id}/{$parts[$idx]}";
+                }
             }
         }
 

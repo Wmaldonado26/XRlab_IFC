@@ -14,6 +14,10 @@ use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 
 class ChunkUploadService
 {
+    private const MAX_UPLOAD_BYTES = 1879048192; // 1.75 GiB, matching the converter limit.
+    private const CHUNK_SIZE_BYTES = 15728640; // 15 MiB, matching the web client.
+    private const MAX_UPLOAD_CHUNKS = 120;
+
     protected ProjectRepository $projectRepository;
 
     public function __construct(ProjectRepository $projectRepository)
@@ -45,6 +49,13 @@ class ChunkUploadService
         $cleanName = basename($fileName);
         if (! str_ends_with(strtolower($cleanName), '.ifc')) {
             throw new \InvalidArgumentException('Solo se admiten archivos con formato IFC (.ifc).');
+        }
+
+        if ($totalBytes < 1 || $totalBytes > self::MAX_UPLOAD_BYTES
+            || $chunkSize < 1 || $chunkSize > self::CHUNK_SIZE_BYTES
+            || $totalChunks !== (int) ceil($totalBytes / $chunkSize)
+            || $totalChunks > self::MAX_UPLOAD_CHUNKS) {
+            throw new \InvalidArgumentException('Los limites de tamano o cantidad de partes de la carga no son validos.');
         }
 
         if ($totalBytes <= 0) {
@@ -178,6 +189,14 @@ class ChunkUploadService
 
         if (! $chunkFile->isValid() || $chunkFile->getSize() <= 0) {
             throw new \InvalidArgumentException("El archivo de la parte {$chunkIndex} es inválido o está vacío.");
+        }
+
+        $expectedChunkSize = min(
+            (int) $manifest['chunkSize'],
+            (int) $manifest['totalBytes'] - ($chunkIndex * (int) $manifest['chunkSize'])
+        );
+        if ($chunkFile->getSize() !== $expectedChunkSize) {
+            throw new \InvalidArgumentException("El tamano de la parte {$chunkIndex} no coincide con el esperado.");
         }
 
         $chunkPath = "{$dir}/chunk_" . sprintf('%06d', $chunkIndex) . '.part';

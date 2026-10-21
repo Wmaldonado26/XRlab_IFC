@@ -3,8 +3,10 @@
 namespace App\Services;
 
 use App\Models\User;
-use Illuminate\Database\Eloquent\Collection;
+use App\Models\Project;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Validation\ValidationException;
 
 class UserService
@@ -16,21 +18,49 @@ class UserService
         $this->authService = $authService;
     }
 
-    public function listUsers(?string $query = null): array
+    public function paginateUsers(
+        ?string $query = null,
+        ?string $role = null,
+        ?string $status = null,
+        int $perPage = 25
+    ): array {
+        $paginator = $this->userQuery($query, $role, $status)
+            ->with('projects:id')
+            ->paginate($perPage)
+            ->withQueryString();
+        $users = $paginator->getCollection();
+        $adminProjectIds = $users->contains(fn (User $user) => $user->isAdmin())
+            ? Project::pluck('id')->all()
+            : [];
+
+        return [
+            'users' => $users
+                ->map(fn (User $user) => $this->authService->formatUserSummary($user, $adminProjectIds))
+                ->all(),
+            'pagination' => [
+                'currentPage' => $paginator->currentPage(),
+                'lastPage' => $paginator->lastPage(),
+                'perPage' => $paginator->perPage(),
+                'total' => $paginator->total(),
+            ],
+        ];
+    }
+
+    private function userQuery(?string $query = null, ?string $role = null, ?string $status = null): Builder
     {
-        $userQuery = User::query();
-
-        if ($query) {
-            $userQuery->where(function ($q) use ($query) {
-                $q->where('name', 'like', "%{$query}%")
-                    ->orWhere('email', 'like', "%{$query}%");
-            });
-        }
-
-        return $userQuery->orderBy('created_at', 'desc')
-            ->get()
-            ->map(fn (User $user) => $this->authService->formatUserSummary($user))
-            ->all();
+        return User::query()
+            ->when($query !== null && trim($query) !== '', function (Builder $builder) use ($query): void {
+                $term = trim($query);
+                $builder->where(function (Builder $search) use ($term): void {
+                    $search->where('name', 'like', "%{$term}%")
+                        ->orWhere('email', 'like', "%{$term}%");
+                });
+            })
+            ->when($role !== null && $role !== 'all', fn (Builder $builder) => $builder->where('role', $role))
+            ->when($status === 'active', fn (Builder $builder) => $builder->where('is_active', true))
+            ->when($status === 'inactive', fn (Builder $builder) => $builder->where('is_active', false))
+            ->orderByDesc('created_at')
+            ->orderBy('id');
     }
 
     public function getUserById(int|string $id): array
@@ -58,7 +88,11 @@ class UserService
 
     public function updateUser(int|string $id, array $data): array
     {
-        $user = User::findOrFail($id);
+        return DB::transaction(function () use ($id, $data): array {
+        $activeAdmins = User::where('role', 'admin')->where('is_active', true)->lockForUpdate()->get();
+        $user = User::lockForUpdate()->findOrFail($id);
+        $wasActiveAdmin = $user->isAdmin() && $user->is_active;
+        $passwordChanged = ! empty($data['password']);
 
         if (isset($data['name'])) {
             $user->name = trim($data['name']);
@@ -80,23 +114,36 @@ class UserService
             $user->is_active = (bool) $data['isActive'];
         }
 
+        if ($wasActiveAdmin && ($user->role !== 'admin' || ! $user->is_active)
+            && $activeAdmins->count() <= 1) {
+            throw ValidationException::withMessages([
+                'error' => ['No es posible desactivar o cambiar el rol del unico administrador activo.'],
+            ]);
+        }
+
         $user->save();
+
+        if ($passwordChanged) {
+            $this->revokeDatabaseSessions($user->id);
+        }
 
         if (isset($data['assignedProjectIds']) && is_array($data['assignedProjectIds'])) {
             $user->projects()->sync($data['assignedProjectIds']);
         }
 
         return $this->authService->formatUserSummary($user);
+        });
     }
 
     public function deleteUser(int|string $id): void
     {
-        $user = User::findOrFail($id);
+        DB::transaction(function () use ($id): void {
+        $activeAdmins = User::where('role', 'admin')->where('is_active', true)->lockForUpdate()->get();
+        $user = User::lockForUpdate()->findOrFail($id);
 
         // Prevent deleting the last remaining admin
-        if ($user->isAdmin()) {
-            $adminsCount = User::where('role', 'admin')->where('is_active', true)->count();
-            if ($adminsCount <= 1) {
+        if ($user->isAdmin() && $user->is_active) {
+            if ($activeAdmins->count() <= 1) {
                 throw ValidationException::withMessages([
                     'error' => ['No es posible eliminar al único administrador activo del sistema.'],
                 ]);
@@ -104,6 +151,19 @@ class UserService
         }
 
         $user->delete();
+        $this->revokeDatabaseSessions($user->id);
+        });
+    }
+
+    private function revokeDatabaseSessions(int|string $userId): void
+    {
+        if (config('session.driver') !== 'database') {
+            return;
+        }
+
+        DB::table(config('session.table', 'sessions'))
+            ->where('user_id', $userId)
+            ->delete();
     }
 
     public function getUserProjectIds(int|string $id): array

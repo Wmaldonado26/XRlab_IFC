@@ -1,7 +1,6 @@
 /**
- * IFC-XRlab - High-Performance IndexedDB Fragment Cache
- * Persists parsed .frag ArrayBuffers locally in the client's browser,
- * eliminating redundant 256MB+ network transfers and re-conversions.
+ * Local cache for BIM fragment buffers. Cache keys include the authenticated
+ * user so projects from different accounts are never mixed in the UI.
  */
 
 const DB_NAME = 'ifc_xrlab_frag_cache';
@@ -10,11 +9,17 @@ const STORE_NAME = 'fragment_buffers';
 
 interface CachedProjectRecord {
   id: string;
+  ownerUserId: string;
+  projectId: string;
   name: string;
   parts: ArrayBufferLike[];
   partNames?: string[];
   totalBytes: number;
   timestamp: number;
+}
+
+function makeCacheId(ownerUserId: string, projectId: string): string {
+  return `${encodeURIComponent(ownerUserId)}::${encodeURIComponent(projectId)}`;
 }
 
 function openDB(): Promise<IDBDatabase> {
@@ -34,133 +39,141 @@ function openDB(): Promise<IDBDatabase> {
 }
 
 export async function saveProjectFragments(
-  id: string,
+  ownerUserId: string,
+  projectId: string,
   name: string,
   parts: ArrayBufferLike[],
   partNames?: string[]
 ): Promise<void> {
   try {
-    if (!id || !parts || !Array.isArray(parts)) return;
+    if (!ownerUserId || !projectId || !parts || !Array.isArray(parts)) return;
     const db = await openDB();
-    const validParts = parts.filter((p) => p && p.byteLength > 0);
-    const totalBytes = validParts.reduce((acc, p) => acc + p.byteLength, 0);
+    const validParts = parts.filter((part) => part && part.byteLength > 0);
+    const totalBytes = validParts.reduce((acc, part) => acc + part.byteLength, 0);
 
     const record: CachedProjectRecord = {
-      id,
-      name: name || id,
+      id: makeCacheId(ownerUserId, projectId),
+      ownerUserId,
+      projectId,
+      name: name || projectId,
       parts: validParts,
       partNames: Array.isArray(partNames) ? partNames : undefined,
       totalBytes,
       timestamp: Date.now(),
     };
 
-    return new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readwrite');
-      const store = tx.objectStore(STORE_NAME);
-      const req = store.put(record);
-
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
+      tx.objectStore(STORE_NAME).put(record);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
     });
+    db.close();
   } catch (err) {
     console.warn('[FragCache] Failed to cache fragments in IndexedDB:', err);
   }
 }
 
 export async function appendProjectFragments(
-  id: string,
+  ownerUserId: string,
+  projectId: string,
   name: string,
   newParts: ArrayBuffer[],
   newPartNames?: string[]
 ): Promise<void> {
   try {
-    if (!id || !newParts || !Array.isArray(newParts)) return;
-    const existing = await getProjectFragments(id);
-    const combinedParts = existing && Array.isArray(existing.parts) ? [...existing.parts, ...newParts] : newParts;
-    let combinedNames: string[] | undefined;
-    if (newPartNames && Array.isArray(newPartNames)) {
-      combinedNames = existing?.partNames ? [...existing.partNames, ...newPartNames] : newPartNames;
-    }
-    await saveProjectFragments(id, name || existing?.name || id, combinedParts, combinedNames);
+    if (!ownerUserId || !projectId || !newParts || !Array.isArray(newParts)) return;
+    const existing = await getProjectFragments(ownerUserId, projectId);
+    const combinedParts = existing ? [...existing.parts, ...newParts] : newParts;
+    const combinedNames = newPartNames
+      ? (existing?.partNames ? [...existing.partNames, ...newPartNames] : newPartNames)
+      : undefined;
+
+    await saveProjectFragments(
+      ownerUserId,
+      projectId,
+      name || existing?.name || projectId,
+      combinedParts,
+      combinedNames
+    );
   } catch (err) {
     console.warn('[FragCache] Failed to append fragments:', err);
   }
 }
 
 export async function getProjectFragments(
-  id: string
-): Promise<{ name: string; parts: ArrayBuffer[]; partNames?: string[] } | null> {
+  ownerUserId: string,
+  projectId: string
+): Promise<{ name: string; parts: ArrayBufferLike[]; partNames?: string[] } | null> {
   try {
-    if (!id) return null;
+    if (!ownerUserId || !projectId) return null;
     const db = await openDB();
-    return new Promise((resolve, reject) => {
+    const record = await new Promise<CachedProjectRecord | undefined>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readonly');
-      const store = tx.objectStore(STORE_NAME);
-      const req = store.get(id);
-
-      req.onsuccess = () => {
-        const res = req.result;
-        if (res && typeof res === 'object' && Array.isArray(res.parts)) {
-          resolve({
-            name: res.name || id,
-            parts: res.parts.filter((p: any) => p && (p instanceof ArrayBuffer || p.byteLength > 0)),
-            partNames: Array.isArray(res.partNames) ? res.partNames : undefined,
-          });
-        } else {
-          resolve(null);
-        }
-      };
-      req.onerror = () => reject(req.error);
+      const request = tx.objectStore(STORE_NAME).get(makeCacheId(ownerUserId, projectId));
+      request.onsuccess = () => resolve(request.result as CachedProjectRecord | undefined);
+      request.onerror = () => reject(request.error);
     });
+    db.close();
+
+    if (!record || record.ownerUserId !== ownerUserId || record.projectId !== projectId || !Array.isArray(record.parts)) {
+      return null;
+    }
+
+    return {
+      name: record.name || projectId,
+      parts: record.parts.filter((part) => Boolean(part && part.byteLength > 0)),
+      partNames: Array.isArray(record.partNames) ? record.partNames : undefined,
+    };
   } catch (err) {
     console.warn('[FragCache] Error reading from IndexedDB:', err);
     return null;
   }
 }
 
-export async function listCachedProjects(): Promise<
-  Array<{ id: string; name: string; totalBytes: number; timestamp: number }>
-> {
+export async function listCachedProjects(
+  ownerUserId: string
+): Promise<Array<{ id: string; name: string; totalBytes: number; timestamp: number }>> {
   try {
+    if (!ownerUserId) return [];
     const db = await openDB();
-    return new Promise((resolve, reject) => {
+    const records = await new Promise<(CachedProjectRecord | null | undefined)[]>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readonly');
-      const store = tx.objectStore(STORE_NAME);
-      const req = store.getAll();
-
-      req.onsuccess = () => {
-        const rawRecords = (req.result as (CachedProjectRecord | null | undefined)[]) || [];
-        const validRecords = rawRecords.filter(
-          (r): r is CachedProjectRecord => Boolean(r && typeof r === 'object' && r.id)
-        );
-        resolve(
-          validRecords.map((r) => ({
-            id: r.id,
-            name: r.name || r.id,
-            totalBytes: typeof r.totalBytes === 'number' ? r.totalBytes : 0,
-            timestamp: typeof r.timestamp === 'number' ? r.timestamp : 0,
-          }))
-        );
-      };
-      req.onerror = () => reject(req.error);
+      const request = tx.objectStore(STORE_NAME).getAll();
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
     });
+    db.close();
+
+    return records
+      .filter((record): record is CachedProjectRecord => Boolean(
+        record && typeof record === 'object' && record.ownerUserId === ownerUserId && record.projectId
+      ))
+      .map((record) => ({
+        id: record.projectId,
+        name: record.name || record.projectId,
+        totalBytes: typeof record.totalBytes === 'number' ? record.totalBytes : 0,
+        timestamp: typeof record.timestamp === 'number' ? record.timestamp : 0,
+      }));
   } catch (err) {
     console.warn('[FragCache] Error listing cached projects:', err);
     return [];
   }
 }
 
-export async function deleteCachedProject(id: string): Promise<void> {
+export async function deleteCachedProject(ownerUserId: string, projectId: string): Promise<void> {
   try {
+    if (!ownerUserId || !projectId) return;
     const db = await openDB();
-    return new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readwrite');
-      const store = tx.objectStore(STORE_NAME);
-      const req = store.delete(id);
-
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
+      tx.objectStore(STORE_NAME).delete(makeCacheId(ownerUserId, projectId));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
     });
+    db.close();
   } catch (err) {
     console.warn('[FragCache] Error deleting from cache:', err);
   }
@@ -169,14 +182,14 @@ export async function deleteCachedProject(id: string): Promise<void> {
 export async function clearAllCachedProjects(): Promise<void> {
   try {
     const db = await openDB();
-    return new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readwrite');
-      const store = tx.objectStore(STORE_NAME);
-      const req = store.clear();
-
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
+      tx.objectStore(STORE_NAME).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
     });
+    db.close();
   } catch (err) {
     console.warn('[FragCache] Error clearing cache:', err);
   }

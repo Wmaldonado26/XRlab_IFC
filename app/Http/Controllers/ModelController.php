@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Services\ModelService;
+use App\Services\ActivityLogger;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -12,10 +13,12 @@ use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 class ModelController extends Controller
 {
     protected ModelService $modelService;
+    protected ActivityLogger $activityLogger;
 
-    public function __construct(ModelService $modelService)
+    public function __construct(ModelService $modelService, ActivityLogger $activityLogger)
     {
         $this->modelService = $modelService;
+        $this->activityLogger = $activityLogger;
     }
 
     /**
@@ -81,6 +84,7 @@ class ModelController extends Controller
         try {
             $file = $request->file('file');
             $model = $this->modelService->uploadDirectFrag($id, $file, $user);
+            $this->activityLogger->record('Modelo cargado', 'model', $model['id'] ?? null, $model['name'] ?? null, $id, [], $user);
 
             return response()->json([
                 'status' => 'ok',
@@ -151,6 +155,7 @@ class ModelController extends Controller
 
         try {
             $result = $this->modelService->deleteModel($id, $user);
+            $this->activityLogger->record('Modelo eliminado', 'model', $id, $result['modelName'] ?? $id, $result['projectId'] ?? null, [], $user);
 
             return response()->json($result);
         } catch (AccessDeniedHttpException $e) {

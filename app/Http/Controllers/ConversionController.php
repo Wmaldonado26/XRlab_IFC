@@ -7,6 +7,7 @@ use App\Services\ConversionService;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 
@@ -29,7 +30,7 @@ class ConversionController extends Controller
         $user = $request->user();
 
         $request->validate([
-            'file' => 'required|file',
+            'file' => 'required|file|max:15360',
         ]);
 
         $projectId = $request->input('projectId') ?: $request->query('projectId');
@@ -57,9 +58,9 @@ class ConversionController extends Controller
 
         $request->validate([
             'fileName' => 'required|string',
-            'totalBytes' => 'required|numeric|min:1',
-            'totalChunks' => 'required|integer|min:1',
-            'chunkSize' => 'required|integer|min:1',
+            'totalBytes' => 'required|integer|min:1|max:1879048192',
+            'totalChunks' => 'required|integer|min:1|max:120',
+            'chunkSize' => 'required|integer|min:1|max:15728640',
             'projectId' => 'nullable|string',
         ]);
 
@@ -91,7 +92,7 @@ class ConversionController extends Controller
         $user = $request->user();
 
         $request->validate([
-            'uploadId' => 'required|string',
+            'uploadId' => 'required|string|max:64',
             'chunkIndex' => 'required|integer|min:0',
             'file' => 'required|file',
         ]);
@@ -161,7 +162,14 @@ class ConversionController extends Controller
         } catch (ModelNotFoundException $e) {
             return response()->json(['error' => $e->getMessage()], 404);
         } catch (\Throwable $e) {
-            return response()->json(['error' => $e->getMessage()], 500);
+            Log::error('Chunked IFC upload completion failed.', [
+                'exception' => $e,
+                'upload_id' => $uploadId,
+            ]);
+
+            return response()->json([
+                'error' => 'No se pudo completar la carga. Intente nuevamente o contacte al administrador.',
+            ], 500);
         }
     }
 

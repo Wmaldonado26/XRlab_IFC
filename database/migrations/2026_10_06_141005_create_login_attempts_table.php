@@ -18,6 +18,7 @@ return new class extends Migration
             $table->timestamp('attempt_time')->useCurrent();
 
             $table->index(['ip', 'attempt_time']);
+            $table->index(['email', 'attempt_time']);
         });
     }
 

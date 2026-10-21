@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Services\ProjectService;
+use App\Services\ActivityLogger;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -12,10 +13,12 @@ use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 class ProjectController extends Controller
 {
     protected ProjectService $projectService;
+    protected ActivityLogger $activityLogger;
 
-    public function __construct(ProjectService $projectService)
+    public function __construct(ProjectService $projectService, ActivityLogger $activityLogger)
     {
         $this->projectService = $projectService;
+        $this->activityLogger = $activityLogger;
     }
 
     /**
@@ -54,6 +57,7 @@ class ProjectController extends Controller
         if ($coverFile) {
             $project = $this->projectService->uploadCoverImage($project['id'], $coverFile, $request->user());
         }
+        $this->activityLogger->record('Proyecto creado', 'project', $project['id'], $project['name'], (string) $project['id'], [], $request->user());
 
         return response()->json([
             'status' => 'ok',
@@ -100,6 +104,7 @@ class ProjectController extends Controller
 
         try {
             $project = $this->projectService->updateProject($id, $validated);
+            $this->activityLogger->record('Proyecto actualizado', 'project', $id, $project['name'], $id, ['fields' => array_keys(array_filter($validated, fn ($value) => $value !== null))], $request->user());
 
             return response()->json([
                 'status' => 'ok',
@@ -124,15 +129,16 @@ class ProjectController extends Controller
 
         $file = $request->file('cover') ?? $request->file('image');
         if (! $file) {
-            return response()->json(['error' => 'No se adjuntó archivo de imagen.'], 422);
+            return response()->json(['error' => 'No se adjuntÃ³ archivo de imagen.'], 422);
         }
 
         try {
             $project = $this->projectService->uploadCoverImage($id, $file, $request->user());
+            $this->activityLogger->record('Portada actualizada', 'project', $id, $project['name'], $id, [], $request->user());
 
             return response()->json([
                 'status' => 'ok',
-                'message' => 'Imagen de portada actualizada con éxito.',
+                'message' => 'Imagen de portada actualizada con Ã©xito.',
                 'project' => $project,
             ]);
         } catch (AccessDeniedHttpException $e) {
@@ -151,10 +157,11 @@ class ProjectController extends Controller
     {
         try {
             $project = $this->projectService->deleteCoverImage($id, $request->user());
+            $this->activityLogger->record('Portada eliminada', 'project', $id, $project['name'], $id, [], $request->user());
 
             return response()->json([
                 'status' => 'ok',
-                'message' => 'Imagen de portada eliminada con éxito.',
+                'message' => 'Imagen de portada eliminada con Ã©xito.',
                 'project' => $project,
             ]);
         } catch (AccessDeniedHttpException $e) {
@@ -184,10 +191,12 @@ class ProjectController extends Controller
     /**
      * Remove the specified project and its models (Admin only).
      */
-    public function destroy(string $id): JsonResponse
+    public function destroy(Request $request, string $id): JsonResponse
     {
         try {
+            $project = \App\Models\Project::findOrFail($id);
             $result = $this->projectService->deleteProject($id);
+            $this->activityLogger->record('Proyecto eliminado', 'project', $id, $project->name, $id, [], $request->user());
 
             return response()->json($result);
         } catch (ModelNotFoundException $e) {
@@ -251,13 +260,13 @@ class ProjectController extends Controller
                 'user' => 'COTECMAR XRlab',
                 'result' => 'Exitoso',
                 'statusClass' => 'ok',
-                'date' => $rm->created_at ? $rm->created_at->format('d M · H:i') : 'Reciente',
+                'date' => $rm->created_at ? $rm->created_at->format('d M Â· H:i') : 'Reciente',
                 'timestamp' => $rm->created_at ? $rm->created_at->timestamp : 0,
             ];
         }
 
         // Recent conversion jobs
-        $recentJobs = \App\Models\ConversionJob::query()
+        $recentJobs = \App\Models\ConversionJob::query()->with(['project', 'user'])
             ->when(! $isAdmin, fn($q) => $q->where('user_id', $user->id))
             ->orderBy('created_at', 'desc')
             ->limit(5)
@@ -267,13 +276,13 @@ class ProjectController extends Controller
             $activity[] = [
                 'id' => 'job_' . $rj->id,
                 'type' => 'conversion',
-                'action' => 'Conversión IFC',
-                'resource' => $rj->original_filename,
-                'projectName' => $rj->project ? $rj->project->name : 'Conversión',
+                'action' => 'ConversiÃ³n IFC',
+                'resource' => $rj->original_ifc_name,
+                'projectName' => $rj->project ? $rj->project->name : 'ConversiÃ³n',
                 'user' => $rj->user ? $rj->user->name : 'Usuario',
                 'result' => $rj->status === 'completed' ? 'Exitoso' : ($rj->status === 'failed' ? 'Error' : 'Procesando'),
                 'statusClass' => $rj->status === 'completed' ? 'ok' : ($rj->status === 'failed' ? 'err' : 'warn'),
-                'date' => $rj->created_at ? $rj->created_at->format('d M · H:i') : 'Reciente',
+                'date' => $rj->created_at ? $rj->created_at->format('d M Â· H:i') : 'Reciente',
                 'timestamp' => $rj->created_at ? $rj->created_at->timestamp : 0,
             ];
         }
@@ -301,72 +310,33 @@ class ProjectController extends Controller
     public function activityLogs(Request $request): JsonResponse
     {
         $user = $request->user();
-        $isAdmin = $user->isAdmin();
-
-        $activity = [];
-
-        // Models
-        $models = \App\Models\BimModel::with('project')
-            ->when(! $isAdmin, fn($q) => $q->whereIn('project_id', $user->projects()->pluck('projects.id')))
-            ->orderBy('created_at', 'desc')
-            ->limit(15)
-            ->get();
-
-        foreach ($models as $m) {
-            $activity[] = [
-                'id' => 'mdl_' . $m->id,
-                'date' => $m->created_at ? $m->created_at->format('d M · H:i') : '—',
-                'user' => 'Administrador',
-                'action' => 'Modelo registrado',
-                'resource' => $m->name . ' (' . ($m->project?->name ?? 'General') . ')',
-                'result' => $m->status === 'ready' ? 'Exitoso' : 'Procesando',
-                'statusClass' => $m->status === 'ready' ? 'ok' : 'warn',
-                'timestamp' => $m->created_at ? $m->created_at->timestamp : 0,
-            ];
+        $validated = $request->validate(['page' => 'sometimes|integer|min:1', 'per_page' => 'sometimes|integer|min:1|max:100']);
+        $query = \App\Models\ActivityLog::query();
+        if (! $user->isAdmin()) {
+            $projectIds = $user->projects()->pluck('projects.id')->map(fn ($id) => (string) $id)->all();
+            $query->where(function ($scope) use ($user, $projectIds) {
+                $scope->where('user_id', $user->id);
+                if ($projectIds) $scope->orWhereIn('project_id', $projectIds);
+            });
         }
-
-        // Conversions
-        $jobs = \App\Models\ConversionJob::query()
-            ->when(! $isAdmin, fn($q) => $q->where('user_id', $user->id))
-            ->orderBy('created_at', 'desc')
-            ->limit(15)
-            ->get();
-
-        foreach ($jobs as $j) {
-            $activity[] = [
-                'id' => 'job_' . $j->id,
-                'date' => $j->created_at ? $j->created_at->format('d M · H:i') : '—',
-                'user' => $j->user?->name ?? 'Usuario',
-                'action' => 'Conversión IFC → FRAG',
-                'resource' => $j->original_filename,
-                'result' => $j->status === 'completed' ? 'Exitoso' : ($j->status === 'failed' ? 'Fallo' : 'En proceso'),
-                'statusClass' => $j->status === 'completed' ? 'ok' : ($j->status === 'failed' ? 'err' : 'warn'),
-                'timestamp' => $j->created_at ? $j->created_at->timestamp : 0,
-            ];
-        }
-
-        // Login attempts (if admin)
-        if ($isAdmin) {
-            $logins = \App\Models\LoginAttempt::orderBy('attempt_time', 'desc')->limit(10)->get();
-            foreach ($logins as $l) {
-                $activity[] = [
-                    'id' => 'login_' . $l->id,
-                    'date' => \Carbon\Carbon::parse($l->attempt_time)->format('d M · H:i'),
-                    'user' => $l->email,
-                    'action' => 'Intento de acceso',
-                    'resource' => 'IP: ' . $l->ip,
-                    'result' => 'Registrado',
-                    'statusClass' => 'ok',
-                    'timestamp' => \Carbon\Carbon::parse($l->attempt_time)->timestamp,
-                ];
-            }
-        }
-
-        usort($activity, fn($a, $b) => $b['timestamp'] <=> $a['timestamp']);
+        $page = $query->orderByDesc('created_at')->orderByDesc('id')->paginate((int) ($validated['per_page'] ?? 25));
+        $page->getCollection()->transform(fn ($log) => [
+            'id' => (string) $log->id,
+            'date' => $log->created_at?->format('d M Â· H:i') ?? 'â€”',
+            'user' => $log->actor_name ?? 'Usuario eliminado',
+            'action' => $log->action,
+            'resource' => $log->resource_name ?? $log->resource_type,
+            'projectName' => $log->project_name,
+            'result' => $log->result === 'success' ? 'Exitoso' : 'Error',
+            'statusClass' => $log->result === 'success' ? 'ok' : 'err',
+            'timestamp' => $log->created_at?->timestamp ?? 0,
+        ]);
 
         return response()->json([
             'status' => 'ok',
-            'logs' => $activity,
+            'logs' => $page->items(),
+            'pagination' => ['currentPage' => $page->currentPage(), 'lastPage' => $page->lastPage(), 'total' => $page->total()],
         ]);
     }
 }
+

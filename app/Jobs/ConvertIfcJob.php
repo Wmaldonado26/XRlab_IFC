@@ -61,6 +61,7 @@ class ConvertIfcJob implements ShouldQueue
                 'stage' => 'Error: Archivo no encontrado',
             ]);
             $appendLog("ERROR: {$errorMsg}");
+            app(\App\Services\ActivityLogger::class)->record('Conversión fallida', 'conversion', $job->id, $job->original_ifc_name, (string) $job->project_id, [], $job->user);
             return;
         }
 
@@ -74,7 +75,8 @@ class ConvertIfcJob implements ShouldQueue
             'total_size_bytes' => $totalBytes,
         ]);
 
-        $outputFrag = "{$tempDir}/output.frag";
+        $safeBaseName = preg_replace('/[^A-Za-z0-9._-]/', '_', pathinfo($this->originalFileName, PATHINFO_FILENAME));
+        $outputFrag = "{$tempDir}/{$safeBaseName}_{$this->jobId}.frag";
         $scriptPath = base_path('scripts/convert-ifc.js');
         $nodePath = 'node';
 
@@ -123,6 +125,7 @@ class ConvertIfcJob implements ShouldQueue
                     'stage' => 'Fallo en conversión',
                 ]);
                 $appendLog("ERROR: {$errorMsg}");
+                app(\App\Services\ActivityLogger::class)->record('Conversión fallida', 'conversion', $job->id, $job->original_ifc_name, (string) $job->project_id, [], $job->user);
                 return;
             }
 
@@ -140,7 +143,12 @@ class ConvertIfcJob implements ShouldQueue
                     'stage' => 'Error: Fragmentos no encontrados',
                 ]);
                 $appendLog("ERROR: {$errorMsg}");
+                app(\App\Services\ActivityLogger::class)->record('Conversión fallida', 'conversion', $job->id, $job->original_ifc_name, (string) $job->project_id, [], $job->user);
                 return;
+            }
+
+            if (count($fragFiles) !== 1) {
+                throw new \RuntimeException('Conversion must produce exactly one .frag file.');
             }
 
             $job->update([
@@ -161,7 +169,7 @@ class ConvertIfcJob implements ShouldQueue
                 }
 
                 $totalFragBytes += $fileSize;
-                $relStoragePath = "{$this->projectId}/{$partName}";
+                $relStoragePath = "FragComver/{$this->projectId}/{$partName}";
 
                 // Stream copy to storage disk 'models' (never load full file into PHP memory!)
                 $stream = fopen($fragAbsPath, 'rb');
@@ -221,6 +229,7 @@ class ConvertIfcJob implements ShouldQueue
             ]);
 
             $appendLog("Conversión finalizada exitosamente. Partes: " . implode(', ', $parts));
+            app(\App\Services\ActivityLogger::class)->record('Conversión completada', 'conversion', $job->id, $job->original_ifc_name, (string) $job->project_id, ['part_count' => count($parts)], $job->user);
         } catch (\Throwable $e) {
             Log::error("[ConvertIfcJob] Exception during conversion: " . $e->getMessage(), ['exception' => $e]);
             $job->update([
@@ -229,6 +238,7 @@ class ConvertIfcJob implements ShouldQueue
                 'stage' => 'Error: ' . substr($e->getMessage(), 0, 80),
             ]);
             $appendLog("EXCEPTION: " . $e->getMessage());
+            app(\App\Services\ActivityLogger::class)->record('Conversión fallida', 'conversion', $job->id, $job->original_ifc_name, (string) $job->project_id, [], $job->user);
         }
     }
 }

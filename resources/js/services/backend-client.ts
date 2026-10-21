@@ -9,6 +9,15 @@ export interface BackendHealth {
 
 export type IfcProgressPhase = 'uploading' | 'uploaded' | 'processing' | 'completed';
 
+function getCsrfToken(): string | null {
+  return document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') ?? null;
+}
+
+function getCsrfHeaders(): Record<string, string> {
+  const token = getCsrfToken();
+  return token ? { 'X-CSRF-TOKEN': token } : {};
+}
+
 export interface BackendConversionProgress {
   percent: number;
   stage: string;
@@ -125,7 +134,7 @@ export async function uploadIfcChunked(
   // 1. Initialize chunked upload session
   const initRes = await fetch('/api/upload/init', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...getCsrfHeaders() },
     credentials: 'include',
     body: JSON.stringify({
       fileName: file.name,
@@ -141,7 +150,7 @@ export async function uploadIfcChunked(
     let errorMsg = `Error al iniciar carga por partes (${initRes.status})`;
     try {
       const errJson = await initRes.json();
-      if (errJson.error) errorMsg = errJson.error;
+      if (errJson.error || errJson.message) errorMsg = errJson.error || errJson.message;
     } catch {}
     throw new Error(errorMsg);
   }
@@ -160,6 +169,7 @@ export async function uploadIfcChunked(
     }
     fetch(`/api/upload/cancel/${encodeURIComponent(uploadId)}`, {
       method: 'DELETE',
+      headers: getCsrfHeaders(),
       credentials: 'include',
     }).catch(() => {});
   };
@@ -218,6 +228,8 @@ export async function uploadIfcChunked(
             activeXhr = xhr;
             xhr.open('POST', '/api/upload/chunk', true);
             xhr.withCredentials = true;
+            const csrfToken = getCsrfToken();
+            if (csrfToken) xhr.setRequestHeader('X-CSRF-TOKEN', csrfToken);
 
             let prevChunkLoaded = 0;
 
@@ -309,7 +321,7 @@ export async function uploadIfcChunked(
     // 4. Complete upload and trigger conversion
     const completeRes = await fetch('/api/upload/complete', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...getCsrfHeaders() },
       credentials: 'include',
       body: JSON.stringify({ uploadId }),
       signal,
@@ -346,7 +358,8 @@ export async function convertIfcViaBackend(
   file: File,
   onProgress: (progress: BackendConversionProgress) => void,
   projectId?: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options: { downloadResult?: boolean } = {}
 ): Promise<BackendConversionResult> {
   if (signal?.aborted) {
     throw new DOMException('Carga cancelada por el usuario', 'AbortError');
@@ -396,6 +409,8 @@ export async function convertIfcViaBackend(
         activeXhr = xhr;
         xhr.open('POST', url, true);
         xhr.withCredentials = true;
+        const csrfToken = getCsrfToken();
+        if (csrfToken) xhr.setRequestHeader('X-CSRF-TOKEN', csrfToken);
 
         let lastTime = performance.now();
         let lastLoaded = 0;
@@ -525,38 +540,41 @@ export async function convertIfcViaBackend(
       try {
         const { parts, downloadUrls, totalSizeMB, durationSec } = data;
 
-        onProgress({
-          percent: 98,
-          stage: 'Sincronizando fragmentos optimizados...',
-          phase: 'processing',
-        });
-
-        // Download fragments sequentially without memory bloat
         const fragmentBuffers: Uint8Array[] = [];
-        for (let i = 0; i < downloadUrls.length; i++) {
-          if (signal?.aborted) break;
-          const downloadUrl = downloadUrls[i];
-          const partName = parts[i] || `Parte ${i + 1}`;
+        if (options.downloadResult !== false) {
           onProgress({
             percent: 98,
-            stage: `Transfiriendo ${partName} (${i + 1}/${downloadUrls.length})...`,
+            stage: 'Descargando fragmento para el visor...',
             phase: 'processing',
           });
 
-          const resp = await fetch(downloadUrl, { credentials: 'include', signal });
-          if (!resp.ok) {
-            let detail = `HTTP ${resp.status}`;
-            try {
-              const errJson = await resp.json();
-              if (errJson.error) detail += `: ${errJson.error}`;
-            } catch {
-              const errText = await resp.text().catch(() => '');
-              if (errText) detail += `: ${errText}`;
+          // Viewer flows opt in to downloading. Storage-only workflows keep the
+          // multi-gigabyte result on the server and only return its metadata.
+          for (let i = 0; i < downloadUrls.length; i++) {
+            if (signal?.aborted) break;
+            const downloadUrl = downloadUrls[i];
+            const partName = parts[i] || `Parte ${i + 1}`;
+            onProgress({
+              percent: 98,
+              stage: `Transfiriendo ${partName} (${i + 1}/${downloadUrls.length})...`,
+              phase: 'processing',
+            });
+
+            const resp = await fetch(downloadUrl, { credentials: 'include', signal });
+            if (!resp.ok) {
+              let detail = `HTTP ${resp.status}`;
+              try {
+                const errJson = await resp.json();
+                if (errJson.error) detail += `: ${errJson.error}`;
+              } catch {
+                const errText = await resp.text().catch(() => '');
+                if (errText) detail += `: ${errText}`;
+              }
+              throw new Error(`Fallo al descargar fragmento desde ${downloadUrl} (${detail})`);
             }
-            throw new Error(`Fallo al descargar fragmento desde ${downloadUrl} (${detail})`);
+            const buf = await resp.arrayBuffer();
+            fragmentBuffers.push(new Uint8Array(buf));
           }
-          const buf = await resp.arrayBuffer();
-          fragmentBuffers.push(new Uint8Array(buf));
         }
 
         onProgress({
@@ -730,13 +748,14 @@ export async function createBackendProject(
     formData.append('cover', coverFile);
     res = await fetch('/api/projects', {
       method: 'POST',
+      headers: getCsrfHeaders(),
       credentials: 'include',
       body: formData,
     });
   } else {
     res = await fetch('/api/projects', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...getCsrfHeaders() },
       credentials: 'include',
       body: JSON.stringify({ name, description }),
     });
@@ -755,6 +774,7 @@ export async function uploadProjectCover(projectId: string, file: File): Promise
   formData.append('cover', file);
   const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/cover`, {
     method: 'POST',
+    headers: getCsrfHeaders(),
     credentials: 'include',
     body: formData,
   });
@@ -769,6 +789,7 @@ export async function uploadProjectCover(projectId: string, file: File): Promise
 export async function deleteProjectCover(projectId: string): Promise<BackendProject> {
   const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/cover`, {
     method: 'DELETE',
+    headers: getCsrfHeaders(),
     credentials: 'include',
   });
   if (!res.ok) {
@@ -785,7 +806,7 @@ export async function updateBackendProject(
 ): Promise<BackendProject> {
   const res = await fetch(`/api/projects/${id}`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...getCsrfHeaders() },
     credentials: 'include',
     body: JSON.stringify(updates),
   });
@@ -800,6 +821,7 @@ export async function updateBackendProject(
 export async function deleteBackendProject(id: string): Promise<{ success: boolean; deletedModelsCount: number }> {
   const res = await fetch(`/api/projects/${id}`, {
     method: 'DELETE',
+    headers: getCsrfHeaders(),
     credentials: 'include',
   });
   if (!res.ok) {
@@ -845,6 +867,7 @@ export async function fetchBackendModelDetail(id: string): Promise<BackendModelI
 export async function deleteBackendModel(id: string): Promise<{ success: boolean; message: string }> {
   const res = await fetch(`/api/models/${id}`, {
     method: 'DELETE',
+    headers: getCsrfHeaders(),
     credentials: 'include',
   });
   if (!res.ok) {
@@ -1031,6 +1054,8 @@ export async function uploadDirectFrag(
     activeXhr = xhr;
     xhr.open('POST', `/api/projects/${encodeURIComponent(projectId)}/models/upload-frag`, true);
     xhr.withCredentials = true;
+    const csrfToken = getCsrfToken();
+    if (csrfToken) xhr.setRequestHeader('X-CSRF-TOKEN', csrfToken);
 
     let lastTime = performance.now();
     let lastLoaded = 0;
@@ -1162,13 +1187,13 @@ export async function fetchDashboardStats(): Promise<DashboardStats> {
   return data.stats;
 }
 
-export async function fetchActivityLogs(): Promise<ActivityLogItem[]> {
-  const res = await fetch('/api/activity', { credentials: 'include' });
+export async function fetchActivityLogs(page = 1): Promise<{ logs: ActivityLogItem[]; currentPage: number; lastPage: number; total: number }> {
+  const res = await fetch(`/api/activity?page=${page}`, { credentials: 'include' });
   if (!res.ok) {
     throw new Error(`Error obteniendo logs de actividad (${res.status})`);
   }
   const data = await res.json();
-  return data.logs || [];
+  return { logs: data.logs || [], currentPage: data.pagination?.currentPage ?? 1, lastPage: data.pagination?.lastPage ?? 1, total: data.pagination?.total ?? 0 };
 }
 
 

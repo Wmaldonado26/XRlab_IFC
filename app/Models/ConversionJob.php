@@ -19,6 +19,7 @@ class ConversionJob extends Model
     protected $fillable = [
         'id',
         'project_id',
+        'user_id',
         'model_id',
         'status',
         'progress',
@@ -51,5 +52,10 @@ class ConversionJob extends Model
     public function project(): BelongsTo
     {
         return $this->belongsTo(Project::class, 'project_id');
+    }
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'user_id');
     }
 }
