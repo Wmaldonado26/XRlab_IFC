@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Services\ModelService;
+use App\Services\ActivityLogger;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -12,10 +13,12 @@ use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 class ModelController extends Controller
 {
     protected ModelService $modelService;
+    protected ActivityLogger $activityLogger;
 
-    public function __construct(ModelService $modelService)
+    public function __construct(ModelService $modelService, ActivityLogger $activityLogger)
     {
         $this->modelService = $modelService;
+        $this->activityLogger = $activityLogger;
     }
 
     /**
@@ -75,12 +78,13 @@ class ModelController extends Controller
         $user = $request->user();
 
         $request->validate([
-            'file' => 'required|file|max:524288', // Max 512 MB
+            'file' => 'required|file|max:4194304', // Max 4 GB
         ]);
 
         try {
             $file = $request->file('file');
             $model = $this->modelService->uploadDirectFrag($id, $file, $user);
+            $this->activityLogger->record('Modelo cargado', 'model', $model['id'] ?? null, $model['name'] ?? null, $id, [], $user);
 
             return response()->json([
                 'status' => 'ok',
@@ -123,6 +127,26 @@ class ModelController extends Controller
     }
 
     /**
+     * Stream binary download of .frag file strictly scoped to a project.
+     */
+    public function downloadProjectModel(Request $request, string $projectId, string $modelId): Response
+    {
+        $user = $request->user();
+
+        try {
+            return $this->modelService->downloadProjectModelFile($projectId, $modelId, $user);
+        } catch (AccessDeniedHttpException $e) {
+            return response()->json([
+                'error' => $e->getMessage(),
+            ], 403);
+        } catch (ModelNotFoundException $e) {
+            return response()->json([
+                'error' => $e->getMessage(),
+            ], 404);
+        }
+    }
+
+    /**
      * Remove the specified model from database and storage (Admin only).
      */
     public function destroy(Request $request, string $id): JsonResponse
@@ -131,6 +155,7 @@ class ModelController extends Controller
 
         try {
             $result = $this->modelService->deleteModel($id, $user);
+            $this->activityLogger->record('Modelo eliminado', 'model', $id, $result['modelName'] ?? $id, $result['projectId'] ?? null, [], $user);
 
             return response()->json($result);
         } catch (AccessDeniedHttpException $e) {

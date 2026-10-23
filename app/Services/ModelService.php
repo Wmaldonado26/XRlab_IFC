@@ -110,11 +110,52 @@ class ModelService
         $model = $this->modelRepository->findById($id);
 
         if (! $model) {
+            // Fallback: search by name across accessible projects if a single match exists
+            $accessibleProjectIds = $user->isAdmin()
+                ? null
+                : $user->projects()->pluck('projects.id')->toArray();
+
+            $query = BimModel::query()->with('project')->where('name', $id);
+            if ($accessibleProjectIds !== null) {
+                $query->whereIn('project_id', $accessibleProjectIds);
+            }
+            $matches = $query->get();
+            if ($matches->count() === 1) {
+                $model = $matches->first();
+            }
+        }
+
+        if (! $model) {
             throw new ModelNotFoundException("Modelo con ID {$id} no encontrado.");
         }
 
         if (! $user->hasAccessToProject($model->project_id)) {
             throw new AccessDeniedHttpException('Acceso denegado. No tiene permisos para descargar modelos de este proyecto.');
+        }
+
+        if (! Storage::disk('models')->exists($model->storage_path)) {
+            throw new ModelNotFoundException("El archivo físico del modelo {$model->name} no existe en disco.");
+        }
+
+        return Storage::disk('models')->download($model->storage_path, $model->name, [
+            'Content-Type' => 'application/octet-stream',
+            'Cache-Control' => 'no-cache, private',
+        ]);
+    }
+
+    /**
+     * Streams binary .frag file strictly scoped to a project (supports canonical UUID or filename).
+     */
+    public function downloadProjectModelFile(string $projectId, string $modelIdentifier, User $user): StreamedResponse|BinaryFileResponse
+    {
+        if (! $user->hasAccessToProject($projectId)) {
+            throw new AccessDeniedHttpException('Acceso denegado. No tiene permisos para descargar modelos de este proyecto.');
+        }
+
+        $model = $this->modelRepository->findInProject($projectId, $modelIdentifier);
+
+        if (! $model) {
+            throw new ModelNotFoundException("Modelo con identificador {$modelIdentifier} no encontrado en el proyecto.");
         }
 
         if (! Storage::disk('models')->exists($model->storage_path)) {

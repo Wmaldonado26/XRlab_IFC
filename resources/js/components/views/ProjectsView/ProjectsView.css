@@ -1,0 +1,215 @@
+/* ===================================================================
+ * PROJECTS VIEW
+ * =================================================================== */
+.filters {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.search {
+  max-width: 330px;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 18px;
+}
+
+.project-create-modal .modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: calc(92vh - 165px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.project-card {
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  overflow: hidden;
+  box-shadow: var(--shadow);
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.project-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 16px 36px rgba(18, 42, 76, 0.12);
+}
+
+.project-cover {
+  height: 130px;
+  background: linear-gradient(135deg, #0c315b, #14719b);
+  position: relative;
+  padding: 15px;
+  color: #ffffff;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.project-cover.has-image::after {
+  display: none;
+}
+
+.project-cover::after {
+  content: "⚓";
+  position: absolute;
+  right: 18px;
+  bottom: 6px;
+  font-size: 72px;
+  opacity: 0.12;
+  pointer-events: none;
+  transition: opacity 0.3s ease;
+}
+
+.project-cover-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: 1;
+  transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.project-card:hover .project-cover-image {
+  transform: scale(1.05);
+}
+
+.project-cover-overlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(8, 24, 46, 0.45) 0%, rgba(8, 24, 46, 0.2) 40%, rgba(8, 24, 46, 0.78) 100%);
+  z-index: 2;
+  pointer-events: none;
+}
+
+.project-cover .badge {
+  background: rgba(255, 255, 255, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  padding: 5px 9px;
+  border-radius: 20px;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  position: relative;
+  z-index: 3;
+  align-self: flex-start;
+  backdrop-filter: blur(6px);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+.cover-actions {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0.85;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.project-card:hover .cover-actions {
+  opacity: 1;
+}
+
+.cover-btn {
+  background: rgba(12, 33, 62, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: #ffffff;
+  padding: 4px 9px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  transition: all 0.2s ease;
+}
+
+.cover-btn:hover {
+  background: rgba(20, 113, 155, 0.95);
+  border-color: rgba(255, 255, 255, 0.6);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(20, 113, 155, 0.4);
+}
+
+.cover-btn.btn-remove {
+  padding: 4px 8px;
+  background: rgba(185, 28, 28, 0.85);
+  border-color: rgba(239, 68, 68, 0.4);
+}
+
+.cover-btn.btn-remove:hover {
+  background: rgba(220, 38, 38, 0.95);
+  border-color: rgba(255, 255, 255, 0.6);
+}
+
+.cover-upload-preview {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px;
+  border-radius: var(--radius-sm, 8px);
+  border: 1px solid var(--line, #e2e8f0);
+  background: #f8fafc;
+}
+
+.cover-upload-thumbnail {
+  width: 72px;
+  height: 48px;
+  border-radius: 6px;
+  object-fit: cover;
+  border: 1px solid var(--line, #cbd5e1);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+}
+
+.project-body {
+  padding: 18px;
+}
+
+.project-body h3 {
+  font-size: 16px;
+  margin: 0 0 7px;
+  color: var(--navy);
+  font-weight: 800;
+}
+
+.project-body p {
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.5;
+  min-height: 35px;
+  margin: 0;
+}
+
+.project-meta {
+  display: flex;
+  justify-content: space-between;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+  margin-top: 12px;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.project-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.project-actions button {
+  flex: 1;
+  padding: 9px 8px;
+  font-size: 11px;
+}

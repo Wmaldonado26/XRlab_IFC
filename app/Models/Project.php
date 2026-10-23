@@ -19,6 +19,7 @@ class Project extends Model
         'id',
         'name',
         'description',
+        'image_url',
     ];
 
     protected static function booted(): void
@@ -31,6 +32,11 @@ class Project extends Model
     }
 
     public function bimModels(): HasMany
+    {
+        return $this->hasMany(BimModel::class, 'project_id');
+    }
+
+    public function models(): HasMany
     {
         return $this->hasMany(BimModel::class, 'project_id');
     }

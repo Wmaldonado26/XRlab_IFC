@@ -19,11 +19,16 @@ class ConversionJob extends Model
     protected $fillable = [
         'id',
         'project_id',
+        'user_id',
         'model_id',
         'status',
         'progress',
+        'stage',
         'error_message',
         'parts_json',
+        'original_ifc_name',
+        'original_ifc_path',
+        'total_size_bytes',
     ];
 
     protected function casts(): array
@@ -31,6 +36,7 @@ class ConversionJob extends Model
         return [
             'progress' => 'integer',
             'parts_json' => 'array',
+            'total_size_bytes' => 'integer',
         ];
     }
 
@@ -46,5 +52,10 @@ class ConversionJob extends Model
     public function project(): BelongsTo
     {
         return $this->belongsTo(Project::class, 'project_id');
+    }
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'user_id');
     }
 }

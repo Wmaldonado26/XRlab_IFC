@@ -60,6 +60,7 @@ class ProjectRepository
         return Project::create([
             'name' => trim($data['name']),
             'description' => isset($data['description']) ? trim($data['description']) : null,
+            'image_url' => $data['image_url'] ?? $data['imageUrl'] ?? null,
         ]);
     }
 
@@ -74,6 +75,11 @@ class ProjectRepository
         }
         if (array_key_exists('description', $data)) {
             $fillable['description'] = $data['description'] !== null ? trim($data['description']) : null;
+        }
+        if (array_key_exists('image_url', $data)) {
+            $fillable['image_url'] = $data['image_url'] !== null ? trim($data['image_url']) : null;
+        } elseif (array_key_exists('imageUrl', $data)) {
+            $fillable['image_url'] = $data['imageUrl'] !== null ? trim($data['imageUrl']) : null;
         }
 
         $project->update($fillable);

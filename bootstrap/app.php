@@ -17,11 +17,17 @@ return Application::configure(basePath: dirname(__DIR__))
             \Illuminate\Cookie\Middleware\AddQueuedCookiesToResponse::class,
             \Illuminate\Session\Middleware\StartSession::class,
         ]);
+        $middleware->api(append: [
+            \Illuminate\Session\Middleware\AuthenticateSession::class,
+            \Illuminate\Foundation\Http\Middleware\ValidateCsrfToken::class,
+        ]);
         $middleware->alias([
             'auth.ifc' => \App\Http\Middleware\EnsureAuthenticated::class,
             'admin.ifc' => \App\Http\Middleware\EnsureAdmin::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
-        //
+        $exceptions->shouldRenderJsonWhen(
+            fn ($request, $exception): bool => $request->is('api/*') || $request->expectsJson()
+        );
     })->create();
